@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { apply } from '../lib/index.js';
+import os from 'node:os';
 import { applyConfig } from '../lib/config.js';
 
 /**
@@ -104,4 +105,84 @@ test('apply 传 undefined 配置不应崩（用默认值）', () => {
     const { ctx } = makeCtx();
     apply(ctx, undefined);
   });
+});
+
+// ---------------------------------------------------------------- 端到端（进程内）
+
+/**
+ * 这条覆盖整条降级链：tools/execute 记录 → turn-stopping 读取。
+ * 唯一的真风险在于两侧解析出的会话 key 是否一致——只测 handleTurnStopping 覆盖不到。
+ */
+test('端到端：write 工具写配置类文件 → 非 git 目录下回合结束必须被拦', async () => {
+  const { clearGateState } = await import('../lib/gate.js');
+  const { clearObserved } = await import('../lib/observed.js');
+  clearGateState();
+  clearObserved();
+  applyConfig({ gate: true });
+
+  const handlers = new Map();
+  const ctx = {
+    on(name, fn) { handlers.set(name, fn); return () => {}; },
+    effect(fn) { const d = fn(); return () => (typeof d === 'function' ? d() : undefined); },
+    tools: { register: () => () => {} },
+    logger: { info() {}, warn() {} },
+  };
+  apply(ctx, { gate: true });
+
+  // 1) 模拟一次成功的 write：路径用本仓库真实存在的 package.json
+  const target = new URL('../package.json', import.meta.url).pathname;
+  const toolHandler = handlers.get('tools/execute');
+  assert.ok(toolHandler, 'tools/execute 钩子必须挂上（否则降级取证无数据源）');
+
+  const execution = {
+    name: 'write',
+    arguments: { file_path: target },
+    agent: { session: { id: 'e2e-session' } },
+  };
+  const result = await toolHandler(execution, async () => ({ ok: true }));
+  assert.deepEqual(result, { ok: true }, '钩子必须把 next() 的返回值原样传回');
+
+  // 2) 回合结束：本会话 cwd 非 git，只能走降级取证
+  const seam = handlers.get('agent/turn-stopping');
+  assert.ok(seam, 'turn-stopping seam 必须挂上');
+
+  const steered = [];
+  const agent = {
+    id: 'e2e-agent',
+    session: {
+      id: 'e2e-session',
+      header: { cwd: os.tmpdir(), delegationDepth: 0 },
+      snapshotEvents: () => [],
+    },
+    steer: (m) => steered.push(m),
+  };
+  await seam({ agent, turn: 1 });
+
+  assert.equal(steered.length, 1, 'write 过 package.json 后收尾必须被拦——两侧会话 key 必须对得上');
+  assert.equal(steered[0].source.kind, 'review-gate');
+  assert.match(JSON.stringify(steered[0]), /降级模式/, '要如实标注取证是降级的');
+});
+
+test('端到端：失败的 write 不该被记录', async () => {
+  const { clearGateState } = await import('../lib/gate.js');
+  const { clearObserved, observedPaths } = await import('../lib/observed.js');
+  clearGateState();
+  clearObserved();
+  applyConfig({ gate: true });
+
+  const handlers = new Map();
+  const ctx = {
+    on(name, fn) { handlers.set(name, fn); return () => {}; },
+    effect(fn) { const d = fn(); return () => (typeof d === 'function' ? d() : undefined); },
+    tools: { register: () => () => {} },
+    logger: { info() {}, warn() {} },
+  };
+  apply(ctx, { gate: true });
+
+  const toolHandler = handlers.get('tools/execute');
+  await toolHandler(
+    { name: 'write', arguments: { file_path: '/tmp/x/package.json' }, agent: { session: { id: 's-fail' } } },
+    async () => ({ isError: true }),
+  );
+  assert.deepEqual(observedPaths('s-fail'), [], 'isError 的写操作不能算改动');
 });
