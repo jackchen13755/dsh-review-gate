@@ -182,8 +182,19 @@ test('门禁总开关关掉 → 完全不介入', async () => {
   assert.equal(text, undefined);
 });
 
-test('子 agent 默认不拦（改动会进同一个 diff）', async () => {
+test('子 agent 默认也拦（盲区：它的 write 不在主会话观察记录里）', async () => {
   setup();
+  const agent = makeAgent({ depth: 1, events: [] });
+  const text = await handleTurnStopping(
+    { agent, turn: 1 },
+    { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
+  );
+  assert.ok(text, '子 agent 改了配置类文件也必须被拦');
+  assert.equal(agent.steered.length, 1);
+});
+
+test('显式关掉 gateSubagents 则不拦（省评审费，但盲区回来）', async () => {
+  setup({ gateSubagents: false });
   const agent = makeAgent({ depth: 1, events: [] });
   const text = await handleTurnStopping(
     { agent, turn: 1 },
@@ -192,14 +203,55 @@ test('子 agent 默认不拦（改动会进同一个 diff）', async () => {
   assert.equal(text, undefined);
 });
 
-test('打开 gateSubagents 后子 agent 也会被拦', async () => {
-  setup({ gateSubagents: true });
-  const agent = makeAgent({ depth: 1, events: [] });
+test('delegationDepth 只挂在 session 上时也要认出来（否则会当成主会话误拦）', async () => {
+  // 判别性设计：把 gateSubagents 关掉后，
+  //   · 认得出是子 agent → 不拦
+  //   · 认不出（当成主会话）→ 会拦
+  // 这样才真的测到 isSubagent，而不是「两边都过」的空断言。
+  setup({ gateSubagents: false });
+  const steered = [];
+  const agent = {
+    id: 'sub-agent-2',
+    session: {
+      header: { cwd: '/tmp/work' }, // 关键：header 里没有 delegationDepth
+      delegationDepth: 2,
+      snapshotEvents: () => [],
+    },
+    steer: (m) => steered.push(m),
+  };
   const text = await handleTurnStopping(
     { agent, turn: 1 },
     { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
   );
-  assert.ok(text);
+  assert.equal(text, undefined, '若把子 agent 误判成主会话，这里会被拦——说明深度探测失效');
+  assert.equal(steered.length, 0);
+});
+
+test('深度探测的对照：同样关掉 gateSubagents，主会话必须仍被拦', async () => {
+  setup({ gateSubagents: false });
+  const agent = makeAgent({ id: 'plain-main', sid: 'plain-main-sess', depth: 0, events: [] });
+  const text = await handleTurnStopping(
+    { agent, turn: 1 },
+    { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
+  );
+  assert.ok(text, '主会话不受 gateSubagents 影响');
+});
+
+test('子 agent 的预算独立计量（不占主会话额度）', async () => {
+  setup({ gateMaxSteersPerTurn: 1, gateMaxSteersPerSession: 3 });
+  // 主会话先烧掉 3 次
+  for (let i = 0; i < 3; i += 1) {
+    const a = makeAgent({ id: 'main-1', sid: 'main-sess', events: [] });
+    await handleTurnStopping({ agent: a, turn: i + 1 }, { collectDiff: async () => configDiff(`M${i}`), readJournal: journalUnknown });
+  }
+  const main = makeAgent({ id: 'main-1', sid: 'main-sess', events: [] });
+  const mainText = await handleTurnStopping({ agent: main, turn: 9 }, { collectDiff: async () => configDiff('M9'), readJournal: journalUnknown });
+  assert.equal(mainText, undefined, '主会话额度应已耗尽');
+
+  // 子 agent 是另一个会话 id，额度独立，仍应被拦
+  const sub = makeAgent({ id: 'sub-1', sid: 'sub-sess', depth: 1, events: [] });
+  const subText = await handleTurnStopping({ agent: sub, turn: 1 }, { collectDiff: async () => configDiff('S1'), readJournal: journalUnknown });
+  assert.ok(subText, '子 agent 不该被主会话的额度连坐');
 });
 
 // ------------------------------------------------------------ 健壮性
