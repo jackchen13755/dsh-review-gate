@@ -1,0 +1,42 @@
+{
+  "name": "dsh-review-gate",
+  "version": "0.1.0",
+  "description": "回合结束强制评审门禁：只读第三方 code-review 插件的 journal 并重放会话日志，判定本轮是否已评审，未评审则用 agent.steer 把回合拉回一步。不修改任何第三方插件。",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "code-review",
+    "completion-gate",
+    "cordis"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "cordis": ">=4.0.0-rc <5"
+  },
+  "peerDependenciesMeta": {
+    "cordis": {
+      "optional": true
+    }
+  }
+}

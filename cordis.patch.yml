@@ -1,0 +1,25 @@
+# dsh-review-gate bundle patch.
+#
+# 作为 bundle 被合入 profile 时自动插入本插件行。行 id 必须与 lib/index.js 的
+# `export const name` 一致（DSH 的 patch 行 id 与插件导出名同源的既有约定）。
+#
+# 装法：
+#   dsh plugin add github:jackchen13755/dsh-review-gate
+# 本地开发：
+#   dsh plugin add link:/Users/<you>/Desktop/dsh/github/dsh-review-gate
+- insert:
+    - id: review-gate
+      name: 'dsh-review-gate'
+      config:
+        # 总开关。false = 完全不介入回合结束。
+        gate: true
+        # 每回合最多把 agent 拉回几次（评审较贵，默认只催 1 次）。
+        gateMaxSteersPerTurn: 1
+        # 每会话总额（必须有：payload.turn 可能缺失，只靠 turn 计数会被反复重置）。
+        gateMaxSteersPerSession: 3
+        # 低于这些阈值的改动不触发，避免把纯排版改动也拦下来。
+        removalThreshold: 20
+        volumeThreshold: 120
+        # 子 agent 默认不单独拦：它的改动会进入同一个 git diff，主会话收尾时已覆盖。
+        # 仅当子 agent 使用独立 worktree 时才需要打开。
+        gateSubagents: false
