@@ -26,3 +26,5 @@
         # 被子 agent 与主会话各判一次、多花一次评审——用 gateMaxSteersPerSession 兜住。
         # 想省评审费可以关掉，但要知道盲区回来了。
         gateSubagents: true
+
+# 绿路验证临时注释（已修改）

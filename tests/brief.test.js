@@ -114,3 +114,58 @@ test('review_brief 调用失败 → 不算证据', async () => {
   );
   assert.ok(text, '失败的工具调用不能当评审证据');
 });
+
+// ------------------------------------------------------------ 仓库根反推 + 取不到就抛错
+
+test('repoRootFromObserved：从写过的文件路径向上找到 .git', async () => {
+  const { recordWrite, clearObserved, repoRootFromObserved } = await import('../lib/observed.js');
+  clearObserved();
+  recordWrite('rr', '/a/b/c/repo/lib/x.js');
+  // 模拟只有 /a/b/c/repo/.git 存在
+  const root = await repoRootFromObserved('rr', {
+    exists: async (p) => p === '/a/b/c/repo/.git',
+  });
+  assert.equal(root, '/a/b/c/repo', '必须向上找到含 .git 的那层');
+});
+
+test('repoRootFromObserved：找不到时返回 undefined，不抛', async () => {
+  const { recordWrite, clearObserved, repoRootFromObserved } = await import('../lib/observed.js');
+  clearObserved();
+  recordWrite('rr2', '/x/y/z.js');
+  const root = await repoRootFromObserved('rr2', { exists: async () => false });
+  assert.equal(root, undefined);
+});
+
+test('repoRootFromObserved：没有观察记录时返回 undefined', async () => {
+  const { clearObserved, repoRootFromObserved } = await import('../lib/observed.js');
+  clearObserved();
+  assert.equal(await repoRootFromObserved('nothing', { exists: async () => true }), undefined);
+});
+
+test('review_brief 取不到改动时必须抛错，不能软返回（否则造成假阳性放行）', async () => {
+  const { apply } = await import('../lib/index.js');
+  const { applyConfig } = await import('../lib/config.js');
+  applyConfig({ gate: true });
+
+  let briefTool;
+  const ctx = {
+    on: () => () => {},
+    effect: (fn) => {
+      const d = fn();
+      return () => (typeof d === 'function' ? d() : undefined);
+    },
+    tools: {
+      register: (t) => { if (t && t.name === 'review_brief') briefTool = t; return () => {}; },
+    },
+    logger: { info() {}, warn() {} },
+  };
+  apply(ctx, { gate: true });
+  assert.ok(briefTool, 'review_brief 必须注册上');
+
+  // cwd 指向一个确定不是 git 仓库的目录，且没有观察记录
+  await assert.rejects(
+    () => briefTool.execute({ input: '' }, { agent: { session: { id: 'no-git', header: { cwd: '/tmp' } } } }),
+    /无法取得改动/,
+    '取不到 diff 必须抛错——成功的工具调用会被门禁当作评审证据',
+  );
+});
