@@ -167,3 +167,30 @@ test('lens 调用失败不算数（和评审一样要求成功）', async () => 
   );
   assert.ok(text, 'lens 失败不能当证据');
 });
+
+// ------------------------------------------------------------ 清单嵌入（强化子 agent 审查）
+
+test('steer 文本必须带「审什么」的清单，并要求逐条给结论', async () => {
+  const { renderGateText } = await import('../lib/gate.js');
+  const text = renderGateText(['config'], { files: [{}] });
+  assert.match(text, /逐条过/, '要明确要求逐条给结论，否则子 agent 容易调完工具就收工');
+  assert.match(text, /配置\/契约/, 'config 类改动要给对应的审查要点');
+  assert.match(text, /通过 \/ 有问题/, '要说明每条怎么回答');
+});
+
+test('清单随触发原因变化：结构性与安全路径给不同要点', async () => {
+  const { renderGateText } = await import('../lib/gate.js');
+  const structural = renderGateText(['structural'], { files: [{}] });
+  const security = renderGateText(['security'], { files: [{}] });
+  assert.match(structural, /模块边界/);
+  assert.match(security, /安全/);
+  assert.notEqual(structural, security, '不同触发原因必须给不同清单，不能是固定模板');
+});
+
+test('清单最多 4 条，避免 steer 文本过长', async () => {
+  const { renderGateText } = await import('../lib/gate.js');
+  const all = ['structural', 'config', 'security', 'decision', 'public-api', 'deletion', 'volume'];
+  const text = renderGateText(all, { files: [{}] });
+  const numbered = text.split('\n').filter((l) => /^\s+\d\)/.test(l));
+  assert.ok(numbered.length <= 4, `清单应 ≤4 条，实际 ${numbered.length}`);
+});
