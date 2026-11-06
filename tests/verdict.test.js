@@ -118,3 +118,46 @@ test('reviewCallInTurn：失败的调用不算数', () => {
   const ok = [callEvent(1), resultEvent('c1', '完成')];
   assert.equal(reviewCallInTurn(ok, { turn: 1 }).seen, true);
 });
+
+// ------------------------------------------- 假绿回归（2026-11-06，阶段 A）
+
+test('假绿①：调用失败但 replay 不置 callSeen → 必须报 call-failed，不许报 no-call', () => {
+  // replay 里明确失败的调用不计入 seen，所以 callSeen=false 有两种含义：
+  // 「真的一次没调」和「调了但那次失败了」。报成后者（no-call）会把排查方向带偏。
+  const r = decideReview({ callSeen: false, resultOk: false });
+  assert.equal(r.reviewed, false);
+  assert.equal(r.reason, 'call-failed', '调用发生过并失败，与「从没调用」是两种故障');
+});
+
+test('假绿②：审完又改（有更早记录、无更晚调用）→ 必须报 stale，不许报 no-call', () => {
+  const r = decideReview({ callSeen: false, digestFresh: false });
+  assert.equal(r.reviewed, false);
+  assert.equal(r.reason, 'stale', '「审完又改」该让人再审这版 diff，而不是让人以为从没审过');
+});
+
+test('假绿②的优先级：「评审已发起未完成」优先于「审完又改」', () => {
+  // 此刻 agent 正在等评审结果，叫它 stale 会诱使它再发一次评审。
+  const r = decideReview({ callSeen: false, callUnresolved: true, digestFresh: false });
+  assert.equal(r.reason, 'call-unresolved');
+});
+
+test('假绿①：reviewCallInTurn 必须把「失败」与「未调用」分开上报', () => {
+  const failed = [callEvent(1), resultEvent('c1', 'REVIEW_FAILED')];
+  const r = reviewCallInTurn(failed, { turn: 1 });
+  assert.equal(r.seen, false, '失败的调用不算已评审');
+  assert.equal(r.failed, true, '但必须标记 failed，否则上层只能报 no-call');
+
+  // 一次失败 + 一次成功 → 成功优先，且不算失败
+  const mixed = [
+    callEvent(1, 'dsh_code_review', 'c1'), resultEvent('c1', 'REVIEW_FAILED'),
+    callEvent(1, 'dsh_code_review', 'c2'), resultEvent('c2', '完成'),
+  ];
+  const m = reviewCallInTurn(mixed, { turn: 1 });
+  assert.equal(m.seen, true);
+  assert.equal(m.failed, false, '另一条成功的评审已覆盖，不该再报失败');
+
+  // 从没调用过 → 既不是 failed 也不是 unresolved
+  const none = reviewCallInTurn([], { turn: 1 });
+  assert.equal(none.failed, false);
+  assert.equal(none.unresolved, false);
+});

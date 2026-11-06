@@ -116,3 +116,27 @@ test('门槛两侧都验：阈值以下不触发，以上触发（只验一边�
   const high = classifyTrigger({ available: true, files }, { thresholds: { volume: 5 } });
   assert.equal(high.trigger, true, '高于阈值必须触发');
 });
+
+// ------------------------------------------- 假绿回归（2026-11-06，阶段 A）
+
+test('假绿③：files 不是数组 → 必须标 undetermined，不许当成「确实没改动」', () => {
+  // 真实故障形状：取证结果畸形（字段被改 / 宿主换了形状）时，
+  // 旧代码走 return err（undetermined:false），于是「读不到」被记成「确认没改动」，
+  // 门禁瞎了也不会在状态里留下任何痕迹。
+  for (const bad of [
+    { available: true },
+    { available: true, files: undefined },
+    { available: true, files: 'oops' },
+    { available: true, files: {} },
+  ]) {
+    const r = classifyTrigger(bad);
+    assert.equal(r.trigger, false, `畸形取证不该触发：${JSON.stringify(bad)}`);
+    assert.equal(r.undetermined, true, `读不到改动清单必须标 undetermined：${JSON.stringify(bad)}`);
+  }
+
+  // 另一侧（反向断言）：空的改动清单是**已确定**的「没有改动」，不能也标成 undetermined，
+  // 否则这个字段就退化成「永远是 true」，等于没有信息量。
+  const empty = classifyTrigger({ available: true, files: [] });
+  assert.equal(empty.trigger, false);
+  assert.equal(empty.undetermined, false, '空清单是已确定的「没改动」，必须与「读不到」区分开');
+});

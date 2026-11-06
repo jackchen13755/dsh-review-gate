@@ -55,6 +55,37 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 
 **明确不拦**：纯 `.md` 且不含判定/API；纯注释与空白；锁文件、`dist/`、`node_modules/`、`CHANGELOG`；`ignoreGlobs` 命中。
 
+### 两个评审工具不等价：`dsh_code_review` 是主干，`review_brief` 只能补位
+
+`dsh_code_review` 会 spawn 一个独立的 reviewer 子 Agent，结论独立；`review_brief` 是本插件自带的退路，它**只把准则与 diff 摆出来，审查由调用者自己完成**（见 `lib/brief.js` 首段）。拿后者交差，本质是自审。
+
+所以判定时按「本会话有没有前者可用」分流。可用性的判据是**本会话里成功跑通过** `dsh_code_review`（有 `tool/call` 且有成功结果）：
+
+- 用「成功过」而不是「出现过」：一次失败的调用同样会留下 `tool/call`，若据此判 weak-tool，就会把 agent 推回去用一个刚刚失败的工具——越推越死。
+- 宁可漏判也不误伤：没调用过、每次都失败、或宿主不落结果，都归为「不可用」，此时 `review_brief` 是唯一退路。
+
+| 情形 | 判定 | 为什么 |
+|---|---|---|
+| 真调了 `dsh_code_review` | 通过（`ok`） | 主干路径 |
+| 调了 `review_brief`，且本会话有前者 | **拦，`weak-tool`** | 有独立评审却用自审顶替 |
+| 调了 `review_brief`，本会话从未出现前者 | 放行，标 `brief-self-review` | 部分子会话（如专家子会话）不加载前者，拦了会把人卡死 |
+
+`brief-self-review` 是**如实标注**而不是等价通过：它不会记成 `ok`，在 `review_gate_status` 里能看出这次是自审。
+
+### 「确认没改」与「取证坏了」必须能区分
+
+取证成功、但文件清单为空（git 干净，或降级取证没看到写入）时，状态记 `skipped: 'no-diff-evidence'`，并带 `noChange: true` 与 `source: 'git' | 'observed'`。
+
+放行行为不变（纯讨论回合不能被卡死），但外部能一眼分清三种情形：
+
+| 状态 | 含义 |
+|---|---|
+| `skipped: 'no-diff'` | 两条取证都拿不到（非 git 且本会话没写过文件） |
+| `skipped: 'no-diff-evidence'` | 取证成功，确实没有改动 |
+| 无 `skipped` 字段 | 门禁正常跑过并按规则判定 |
+
+在此之前，后两种在状态里都是 `reviewed: false` + `files: 0`，和「门禁根本没运行」长得一样——这正是最难查的一类静默故障。
+
 ## 非 git 目录下的降级取证
 
 门禁优先用 `git diff` 取证。当目录不是 git 仓库（或 git 取不到 diff）时，**降级**为「本会话实际写过的文件」：包装 `tools/execute`，只在 `edit` / `write` **成功**时记录路径。

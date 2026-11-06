@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { applyConfig } from '../lib/config.js';
-import { handleTurnStopping, clearGateState, createSteerMessage, STEER_SOURCE_KIND } from '../lib/gate.js';
+import { handleTurnStopping, clearGateState, createSteerMessage, STEER_SOURCE_KIND, statusOf } from '../lib/gate.js';
 
 /** 造一个最小 agent：只有 turn-stopping 会用到的字段。 */
 function makeAgent({ id = 's1', depth = 0, events = [], cwd = '/tmp/work' } = {}) {
@@ -285,4 +285,102 @@ test('没有 agent / agent 没有 steer：安全返回', async () => {
   setup();
   assert.equal(await handleTurnStopping({}, {}), undefined);
   assert.equal(await handleTurnStopping({ agent: { id: 'x' } }, {}), undefined);
+});
+
+// --------------------------------------- 假绿回归：接线层（2026-11-06，阶段 A）
+
+test('假绿①接线：评审调用失败 → reason 必须是 call-failed，不许报成 no-call', async () => {
+  setup();
+  // 事件里有真实的 tool/call + 一条失败结果（第三方插件用 REVIEW_FAILED 报错）
+  const agent = makeAgent({ events: [callEvent(1), resultEvent(1, 'c1', 'REVIEW_FAILED: 子模型挂了')] });
+  const text = await handleTurnStopping(
+    { agent, turn: 1 },
+    { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
+  );
+
+  assert.ok(text, '失败的评审必须仍然拦住（这点没变）');
+  const st = statusOf(agent.id).last;
+  assert.equal(
+    st.reason,
+    'call-failed',
+    `失败要说成失败。实际 reason=${st.reason}（若为 no-call，说明 gate 又把 resultOk 固定写成了 true）`,
+  );
+});
+
+test('假绿②接线：审完又改 → reason 必须是 stale，不许报成 no-call', async () => {
+  setup();
+  const agent = makeAgent({ events: [callEvent(1), resultEvent(1, 'c1', '完成')] });
+
+  // 第一回合：真实评审并通过，记下 digest D1
+  const first = await handleTurnStopping(
+    { agent, turn: 1 },
+    { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
+  );
+  assert.equal(first, undefined, '第一回合已评审，不该拦');
+
+  // 第二回合：代码又改了（digest D2），且本回合没有任何评审调用
+  agent.session.snapshotEvents = () => [];
+  const second = await handleTurnStopping(
+    { agent, turn: 2 },
+    { collectDiff: async () => configDiff('D2'), readJournal: journalUnknown },
+  );
+
+  assert.ok(second, '审完又改必须拦住（这点没变）');
+  const st = statusOf(agent.id).last;
+  assert.equal(
+    st.reason,
+    'stale',
+    `应报「评审未覆盖当前这版 diff」。实际 reason=${st.reason}（若为 no-call，说明 digestFresh 又被固定传成了 undefined）`,
+  );
+});
+
+// ------------------------- 死路回归：turn 缺失时重审必须能放行（2026-11-06，阶段 A）
+
+test('死路回归：payload.turn 缺失时，改成 D2 后完整重审一次必须放行', async () => {
+  setup();
+  let events = [callEvent(1, 'c1'), resultEvent(1, 'c1', '完成')];
+  const agent = makeAgent({ events: [] });
+  agent.session.snapshotEvents = () => events;
+
+  // 首轮：真实评审并通过，记下 D1（本回合没有 turn）
+  const first = await handleTurnStopping(
+    { agent },
+    { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
+  );
+  assert.equal(first, undefined, '首轮已评审，应放行');
+
+  // 代码改成 D2，并且完整重审了一次（新的 callId）
+  events = [callEvent(1, 'c1'), resultEvent(1, 'c1', '完成'), callEvent(2, 'c2'), resultEvent(2, 'c2', '完成')];
+  const second = await handleTurnStopping(
+    { agent },
+    { collectDiff: async () => configDiff('D2'), readJournal: journalUnknown },
+  );
+
+  assert.equal(
+    second,
+    undefined,
+    '认真重审过就必须放行。被拦说明 turn 缺失时退化成永久 stale——重审多少次都放不出去',
+  );
+  assert.equal(statusOf(agent.id).last.reason, 'ok');
+});
+
+test('死路回归的反向断言：turn 缺失、改了代码但没重审 → 仍必须拦（放宽不能放过）', async () => {
+  setup();
+  const events = [callEvent(1, 'c1'), resultEvent(1, 'c1', '完成')];
+  const agent = makeAgent({ events: [] });
+  agent.session.snapshotEvents = () => events;
+
+  await handleTurnStopping(
+    { agent },
+    { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
+  );
+
+  // 代码又改了，但没有任何新的评审调用
+  const second = await handleTurnStopping(
+    { agent },
+    { collectDiff: async () => configDiff('D2'), readJournal: journalUnknown },
+  );
+
+  assert.ok(second, '没重审就必须拦');
+  assert.equal(statusOf(agent.id).last.reason, 'stale', '原因仍要说清是「评审没覆盖这版 diff」');
 });
