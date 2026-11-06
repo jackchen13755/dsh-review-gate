@@ -16,7 +16,22 @@
         # 每回合最多把 agent 拉回几次（评审较贵，默认只催 1 次）。
         gateMaxSteersPerTurn: 1
         # 每会话总额（必须有：payload.turn 可能缺失，只靠 turn 计数会被反复重置）。
-        gateMaxSteersPerSession: 3
+        #
+        # 注意：这个数是**每个检查点**的额度，不是每会话一个总数。turn-stopping 与
+        # pre-step 各记一份（budgetKey 不同，见 tests/prestep.test.js 明确断言
+        # 「pre-step 应有独立额度」），所以真实上限是最多 2×N。
+        # 原来是 3——太紧：开了「改代码就评审」之后，正常长度的会话在第 3 回合之后
+        # 就被静默放行，用户看到的表现是「又不自动评审了」，兜底规则被架空。
+        # 20（合计最多 40）足够覆盖长会话，仍留上限防死循环。
+        # 耗尽时会在 review_gate_status 里留下 reason=budget-exhausted，不再静默。
+        gateMaxSteersPerSession: 20
+        # 兜底：改动里有非注释的代码变更就评审（纯注释 / 纯文档 / 空改动放行）。
+        # 七条规则回答的是「哪里最危险」，不回答「哪里改了」；只改一两行时一条都不命中，
+        # 门禁沉默，用户只能手动开评审。关掉它退回「只在命中七条规则时评审」的旧行为。
+        reviewAnyCodeChange: true
+        # canary（变异检定）shadow：只在状态里记录有没有拿到「能红一次」的回执，
+        # 不参与放行。先观察误伤与伪造情况，再谈武器化。
+        canaryShadow: true
         # 低于这些阈值的改动不触发，避免把纯排版改动也拦下来。
         removalThreshold: 20
         volumeThreshold: 120

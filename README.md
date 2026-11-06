@@ -44,6 +44,15 @@ DSH（DeepSeek Harness）插件。当一轮改动命中「判定类 / 配置类�
 | `deletion` | 删除了文件，或删除行数 ≥ 阈值（默认 20） |
 | `structural` | **新增或删除代码文件**（= 动了模块边界），除评审外还要求跑 `lens` |
 | `volume` | 总改动行数 ≥ 阈值（默认 120） |
+| `code` | **兜底**：改动里有非注释的代码变更（纯注释 / 纯文档 / 空改动放行）。上面七条回答「哪里最危险」，它回答「哪里改了」 |
+
+### 为什么需要 `code` 这条兜底
+
+七条规则只覆盖「最危险的改动」，不覆盖「改了代码」本身。实测反馈：只改一两行的回合一条规则都不命中，门禁一声不响，用户只能手动开评审（某会话的日志就是 `skipped=- / reasons=` 全空）。
+
+规则的精确度应该体现在**清单**上，而不是体现在「要不要介入」上——所以补一条兜底：只要不是纯注释/纯文档改动就要求评审。觉得吵可以用 `reviewAnyCodeChange: false` 关掉，退回「只在命中七条规则时评审」的旧行为。
+
+注：注释判定按文件类型区分。JS/TS/CSS 里的 `#` 是私有字段和 id 选择器（代码），只有 `.py`/`.sh`/`.yml` 一类文件里 `#` 才是注释——一刀切会把这类改动当成注释静默放行。
 
 ### 结构性改动为什么额外要求 `lens`
 
@@ -139,7 +148,12 @@ dsh plugin add github:jackchen13755/dsh-review-gate
 dsh plugin add link:/path/to/dsh-review-gate
 ```
 
-配置写在 `cordis.patch.yml` 的 `config` 段，可调项：`gate`、`gateMaxSteersPerTurn`、`gateMaxSteersPerSession`、`removalThreshold`、`volumeThreshold`、`gateSubagents`、`ignoreGlobs`、`extraTriggerGlobs`、`timeoutMs`。
+配置写在 `cordis.patch.yml` 的 `config` 段，可调项：`gate`、`gateMaxSteersPerTurn`、`gateMaxSteersPerSession`、`removalThreshold`、`volumeThreshold`、`gateSubagents`、`reviewAnyCodeChange`、`canaryShadow`、`ignoreGlobs`、`extraTriggerGlobs`、`timeoutMs`。
+
+两个容易误读的点：
+
+- **预算按检查点分桶**：`gateMaxSteersPerSession` 是「每个检查点」的额度，`turn-stopping` 与 `pre-step` 各一份（`pre-step` 需要独立额度，否则回合进行中被卡死），所以真实上限最多是 2×N。预算耗尽时会写 `reason: budget-exhausted` 并在诊断日志留痕，不再静默。
+- **`canaryShadow`**：变异检定（`canary_verify`）目前只把结果记进状态，**不参与放行**。先观察误伤与伪造情况，再谈武器化。
 
 ## 测试
 
