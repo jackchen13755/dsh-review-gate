@@ -66,17 +66,52 @@ test('pre-step：没有写操作时不介入（不打扰纯读会话）', async 
   assert.equal(agent.steered.length, 0, '没写过文件就不该打扰');
 });
 
-test('pre-step：写过文件但没评审 → 会介入', async () => {
+test('pre-step：刚写完文件的下一步不介入（给 agent 主动取证的窗口）', async () => {
   clearGateState(); clearObserved(); applyConfig({ gate: true });
   const { ctx, handlers } = makeCtx();
   apply(ctx, { gate: true });
   const pre = handlers.get('agent/pre-step');
 
-  const agent = makeAgent('ps-dirty');
-  recordWrite('ps-dirty', '/repo/package.json', { created: false });
-  // 让 pre-step 内部走到改写后的判定：cwd 非 git → 降级取证 → config 命中
+  const agent = makeAgent('ps-quiet1');
+  recordWrite('ps-quiet1', '/repo/package.json', { created: false });
   await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
-  assert.ok(agent.steered.length >= 1, '写过配置类文件却没评审，应当介入');
+  assert.equal(agent.steered.length, 0,
+    '刚写完就拦会在 agent 正要调评审的那一刻抢先介入，反而制造它本想避免的返工');
+});
+
+test('pre-step：连续多步都没评审 → 才介入', async () => {
+  clearGateState(); clearObserved(); applyConfig({ gate: true });
+  const { ctx, handlers } = makeCtx();
+  apply(ctx, { gate: true });
+  const pre = handlers.get('agent/pre-step');
+
+  const agent = makeAgent('ps-quiet2');
+  recordWrite('ps-quiet2', '/repo/package.json', { created: false });
+  // 第 1 步让路
+  await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
+  assert.equal(agent.steered.length, 0);
+  // 第 2 步应当介入
+  await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
+  assert.ok(agent.steered.length >= 1, '过了窗口期仍未评审，就该介入');
+});
+
+test('pre-step：新一轮写入会重置窗口（每次改动都重新给机会）', async () => {
+  clearGateState(); clearObserved(); applyConfig({ gate: true });
+  const { ctx, handlers } = makeCtx();
+  apply(ctx, { gate: true });
+  const pre = handlers.get('agent/pre-step');
+
+  const agent = makeAgent('ps-reset');
+  recordWrite('ps-reset', '/repo/a/package.json', { created: false });
+  await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
+  await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
+  const afterFirst = agent.steered.length;
+  assert.ok(afterFirst >= 1, '首轮应已介入');
+
+  // 又写了一次 → 窗口重置，下一步不该再拦
+  recordWrite('ps-reset', '/repo/b/package.json', { created: false });
+  await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
+  assert.equal(agent.steered.length, afterFirst, '新写入后应重新给一步窗口');
 });
 
 test('pre-step 的预算与 turn-stopping 独立（不互相吃额度）', async () => {
