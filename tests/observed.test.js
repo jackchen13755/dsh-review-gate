@@ -182,15 +182,16 @@ test('没有观察记录且非 git → 放行，并把 skipped 记为 no-diff', 
 
 // ------------------------------------------------------------ 新增 vs 修改（structural 在降级模式下的前提）
 
-test('降级模式：文件原本不存在 → 记为 A（新增），structural 才能触发', async () => {
+test('降级模式：写入前不存在 → 记为 A（新增），structural 才能触发', async () => {
   clearObserved();
-  recordWrite('new-file', '/repo/lib/newmod.js');
+  // created 由调用方在**写入之前**判定并传入（看当前文件是否存在是错的：
+  // 回合结束时新文件必然已存在）
+  recordWrite('new-file', '/repo/lib/newmod.js', { created: true });
   const snap = await observedSnapshot('new-file', {
-    readFile: async () => { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; },
-    exists: async () => false, // 文件不存在
+    readFile: async () => 'export const x = 1',
     cwd: '/repo',
   });
-  assert.equal(snap.files[0].status, 'A', '新建的文件必须记成 A，否则 structural 永不触发');
+  assert.equal(snap.files[0].status, 'A', '写入前不存在的文件必须记成 A，否则 structural 永不触发');
 });
 
 test('降级模式：文件本来就有 → 记为 M（修改），不误判为新增', async () => {
@@ -207,10 +208,9 @@ test('降级模式：文件本来就有 → 记为 M（修改），不误判为�
 test('降级模式：新增代码文件 → 真的能命中 structural（这是本轮修的缺口）', async () => {
   const { classifyTrigger } = await import('../lib/trigger.js');
   clearObserved();
-  recordWrite('struct', '/repo/lib/brand-new.js');
+  recordWrite('struct', '/repo/lib/brand-new.js', { created: true });
   const snap = await observedSnapshot('struct', {
-    readFile: async () => { throw new Error('ENOENT'); },
-    exists: async () => false,
+    readFile: async () => 'export function hello() {}',
     cwd: '/repo',
   });
   const cls = classifyTrigger(snap);
@@ -220,10 +220,9 @@ test('降级模式：新增代码文件 → 真的能命中 structural（这是�
 test('降级模式：新增非代码文件（.md）→ 不命中 structural', async () => {
   const { classifyTrigger } = await import('../lib/trigger.js');
   clearObserved();
-  recordWrite('struct-md', '/repo/docs/note.md');
+  recordWrite('struct-md', '/repo/docs/note.md', { created: true });
   const snap = await observedSnapshot('struct-md', {
-    readFile: async () => { throw new Error('ENOENT'); },
-    exists: async () => false,
+    readFile: async () => '# note',
     cwd: '/repo',
   });
   const cls = classifyTrigger(snap);

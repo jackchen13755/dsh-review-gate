@@ -199,3 +199,64 @@ test('渲染的 steer 文本必须给出「没有工具时怎么办」的退路'
   assert.match(text, /dsh_code_review/);
   assert.match(text, /没有 .* 这个工具|本会话没有/, '拿不到工具的会话需要有诚实的退路，不能静默收工');
 });
+
+test('端到端：write 新建文件 → created 必须在写入前判定（这条是实机失败后补的）', async () => {
+  const { clearGateState } = await import('../lib/gate.js');
+  const { clearObserved, observedSnapshot } = await import('../lib/observed.js');
+  clearGateState();
+  clearObserved();
+  applyConfig({ gate: true });
+
+  const handlers = new Map();
+  const ctx = {
+    on(name, fn) { handlers.set(name, fn); return () => {}; },
+    effect(fn) { const d = fn(); return () => (typeof d === 'function' ? d() : undefined); },
+    tools: { register: () => () => {} },
+    logger: { info() {}, warn() {} },
+  };
+  apply(ctx, { gate: true });
+
+  const toolHandler = handlers.get('tools/execute');
+  // 目标是一个【当前不存在】的路径
+  const target = '/tmp/__never_exists_gate_test__/brand-new.js';
+  const execution = { name: 'write', arguments: { file_path: target }, agent: { session: { id: 'created-e2e' } } };
+
+  let existedAtNext = null;
+  await toolHandler(execution, async () => {
+    // next() 执行时（即写入时刻），这个路径还不存在
+    const { existsSync } = await import('node:fs');
+    existedAtNext = existsSync(target);
+    return { ok: true };
+  });
+  assert.equal(existedAtNext, false, '前提：写入时文件确实还不存在');
+
+  const snap = await observedSnapshot('created-e2e', {
+    readFile: async () => 'export const x = 1',
+    cwd: '/',
+  });
+  assert.equal(snap.files[0].status, 'A',
+    '写入前不存在的文件必须记成 A —— 实机失败就是因为判在了写入之后');
+});
+
+test('端到端：write 覆盖已存在文件 → 记 M，不误报新增', async () => {
+  const { clearObserved, observedSnapshot } = await import('../lib/observed.js');
+  clearObserved();
+  const handlers = new Map();
+  const ctx = {
+    on(name, fn) { handlers.set(name, fn); return () => {}; },
+    effect(fn) { const d = fn(); return () => (typeof d === 'function' ? d() : undefined); },
+    tools: { register: () => () => {} },
+    logger: { info() {}, warn() {} },
+  };
+  apply(ctx, { gate: true });
+  const toolHandler = handlers.get('tools/execute');
+
+  // package.json 一定存在
+  const target = new URL('../package.json', import.meta.url).pathname;
+  await toolHandler(
+    { name: 'write', arguments: { file_path: target }, agent: { session: { id: 'exist-e2e' } } },
+    async () => ({ ok: true }),
+  );
+  const snap = await observedSnapshot('exist-e2e', { readFile: async () => '{}', cwd: '/' });
+  assert.equal(snap.files[0].status, 'M', '覆盖已有文件不该被当成新增');
+});
