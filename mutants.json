@@ -1,0 +1,21 @@
+{
+  "baselineCmd": "node --test --test-reporter=tap tests/canary/",
+  "mutants": [
+    {
+      "id": "trigger.removal-threshold",
+      "file": "lib/trigger.js",
+      "old": "if (totalRemoved >= removalThreshold) reasons.add(REASONS.DELETION);",
+      "new": "if (totalRemoved > removalThreshold) reasons.add(REASONS.DELETION);",
+      "expectRed": "@canary id=trigger.removal-threshold",
+      "why": "把 >= 改成 > 会让「刚好删满阈值」这一格静默失效；判定类代码最典型的一格。"
+    },
+    {
+      "id": "trigger.removal-threshold-overtrigger",
+      "file": "lib/trigger.js",
+      "old": "if (totalRemoved >= removalThreshold) reasons.add(REASONS.DELETION);",
+      "new": "if (totalRemoved >= removalThreshold - 1) reasons.add(REASONS.DELETION);",
+      "expectRed": "@canary id=trigger.removal-threshold",
+      "why": "反方向：阈值被悄悄放宽一行（过度触发）。只钉「少判」一个方向等于只锁半扇门——审查实测发现这条反向断言当时没有任何变异体碰过。"
+    }
+  ]
+}
