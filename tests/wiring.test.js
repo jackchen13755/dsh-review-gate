@@ -186,3 +186,16 @@ test('端到端：失败的 write 不该被记录', async () => {
   );
   assert.deepEqual(observedPaths('s-fail'), [], 'isError 的写操作不能算改动');
 });
+
+test('必须声明 inject 依赖 tools（否则 ctx.tools 未就位、工具注册被静默跳过）', async () => {
+  const mod = await import('../lib/index.js');
+  assert.ok(Array.isArray(mod.inject), '必须导出 inject 数组');
+  assert.ok(mod.inject.includes('tools'), 'inject 必须包含 tools —— v0.4.0 及之前漏了这条，review_gate_status 在所有会话里都不存在');
+});
+
+test('渲染的 steer 文本必须给出「没有工具时怎么办」的退路', async () => {
+  const { renderGateText } = await import('../lib/gate.js');
+  const text = renderGateText(['config'], { files: [{}], partial: false });
+  assert.match(text, /dsh_code_review/);
+  assert.match(text, /没有 .* 这个工具|本会话没有/, '拿不到工具的会话需要有诚实的退路，不能静默收工');
+});
