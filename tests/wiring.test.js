@@ -113,12 +113,30 @@ test('apply 传 undefined 配置不应崩（用默认值）', () => {
  * 这条覆盖整条降级链：tools/execute 记录 → turn-stopping 读取。
  * 唯一的真风险在于两侧解析出的会话 key 是否一致——只测 handleTurnStopping 覆盖不到。
  */
-test('端到端：write 工具写配置类文件 → 非 git 目录下回合结束必须被拦', async () => {
+test('端到端：write 工具写配置类文件 → cwd 非 git 时按仓库根取证并拦下', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const fsp = await import('node:fs');
+  const pathp = await import('node:path');
   const { clearGateState } = await import('../lib/gate.js');
   const { clearObserved } = await import('../lib/observed.js');
   clearGateState();
   clearObserved();
   applyConfig({ gate: true });
+
+  // 自持夹具：临时 git 仓库 + 一次提交 + 一处未提交改动。
+  //
+  // 以前这里写的是本仓库真实的 package.json，于是「生产工作树有没有未提交改动」
+  // 直接决定这条用例成败（提交之后就恒绿或恒红）。夹具必须自带状态。
+  const base = fsp.mkdtempSync(pathp.join(os.tmpdir(), 'wiring-repo-'));
+  const repo = pathp.join(base, 'repo');
+  fsp.mkdirSync(repo, { recursive: true });
+  const git = (args) => execFileSync('git', args, { cwd: repo, stdio: 'ignore' });
+  git(['init', '-q']);
+  const pkg = pathp.join(repo, 'package.json');
+  fsp.writeFileSync(pkg, '{\n  "name": "fixture",\n  "version": "1.0.0"\n}\n');
+  git(['add', 'package.json']);
+  git(['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-q', '-m', 'init']);
+  fsp.writeFileSync(pkg, '{\n  "name": "fixture",\n  "version": "1.0.1"\n}\n'); // 未提交改动
 
   const handlers = new Map();
   const ctx = {
@@ -129,20 +147,19 @@ test('端到端：write 工具写配置类文件 → 非 git 目录下回合结�
   };
   apply(ctx, { gate: true });
 
-  // 1) 模拟一次成功的 write：路径用本仓库真实存在的 package.json
-  const target = new URL('../package.json', import.meta.url).pathname;
+  // 1) 模拟一次成功的 write
   const toolHandler = handlers.get('tools/execute');
   assert.ok(toolHandler, 'tools/execute 钩子必须挂上（否则降级取证无数据源）');
-
   const execution = {
     name: 'write',
-    arguments: { file_path: target },
+    arguments: { file_path: pkg },
     agent: { session: { id: 'e2e-session' } },
   };
   const result = await toolHandler(execution, async () => ({ ok: true }));
   assert.deepEqual(result, { ok: true }, '钩子必须把 next() 的返回值原样传回');
 
-  // 2) 回合结束：本会话 cwd 非 git，只能走降级取证
+  // 2) 回合结束：cwd 是个不含 .git 的临时目录，门禁必须反推出仓库根
+  const nonRepo = fsp.mkdtempSync(pathp.join(os.tmpdir(), 'wiring-cwd-'));
   const seam = handlers.get('agent/turn-stopping');
   assert.ok(seam, 'turn-stopping seam 必须挂上');
 
@@ -151,7 +168,7 @@ test('端到端：write 工具写配置类文件 → 非 git 目录下回合结�
     id: 'e2e-agent',
     session: {
       id: 'e2e-session',
-      header: { cwd: os.tmpdir(), delegationDepth: 0 },
+      header: { cwd: nonRepo, delegationDepth: 0 },
       snapshotEvents: () => [],
     },
     steer: (m) => steered.push(m),
@@ -160,7 +177,55 @@ test('端到端：write 工具写配置类文件 → 非 git 目录下回合结�
 
   assert.equal(steered.length, 1, 'write 过 package.json 后收尾必须被拦——两侧会话 key 必须对得上');
   assert.equal(steered[0].source.kind, 'review-gate');
-  assert.match(JSON.stringify(steered[0]), /降级模式/, '要如实标注取证是降级的');
+  assert.equal(
+    /降级模式/.test(JSON.stringify(steered[0])),
+    false,
+    '反推到仓库根后拿到的是真 diff，不该再标成降级取证',
+  );
+
+  fsp.rmSync(base, { recursive: true, force: true });
+  fsp.rmSync(nonRepo, { recursive: true, force: true });
+});
+
+test('端到端：确实反推不出仓库根时，仍如实标注降级取证', async () => {
+  const { clearGateState } = await import('../lib/gate.js');
+  const { clearObserved } = await import('../lib/observed.js');
+  const fsp = await import('node:fs');
+  const pathp = await import('node:path');
+  clearGateState();
+  clearObserved();
+  applyConfig({ gate: true });
+
+  // 文件与 cwd 都在「上溯 12 层也找不到 .git」的临时目录里
+  const lonely = fsp.mkdtempSync(pathp.join(os.tmpdir(), 'wiring-lonely-'));
+  const target = pathp.join(lonely, 'package.json');
+  fsp.writeFileSync(target, '{ "name": "x" }\n');
+
+  const handlers = new Map();
+  const ctx = {
+    on(name, fn) { handlers.set(name, fn); return () => {}; },
+    effect(fn) { const d = fn(); return () => (typeof d === 'function' ? d() : undefined); },
+    tools: { register: () => () => {} },
+    logger: { info() {}, warn() {} },
+  };
+  apply(ctx, { gate: true });
+
+  await handlers.get('tools/execute')(
+    { name: 'write', arguments: { file_path: target }, agent: { session: { id: 'lonely-session' } } },
+    async () => ({ ok: true }),
+  );
+
+  const steered = [];
+  const agent = {
+    id: 'lonely-agent',
+    session: { id: 'lonely-session', header: { cwd: lonely, delegationDepth: 0 }, snapshotEvents: () => [] },
+    steer: (m) => steered.push(m),
+  };
+  await handlers.get('agent/turn-stopping')({ agent, turn: 1 });
+
+  assert.equal(steered.length, 1, '没有仓库根时只能靠观察记录，但仍然必须拦');
+  assert.match(JSON.stringify(steered[0]), /降级模式/, '取证确实是降级的，必须如实标注');
+  fsp.rmSync(lonely, { recursive: true, force: true });
 });
 
 test('端到端：失败的 write 不该被记录', async () => {

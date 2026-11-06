@@ -111,9 +111,13 @@ test('isCommentOnly：空数组为 true；混入代码为 false', () => {
 
 test('门槛两侧都验：阈值以下不触发，以上触发（只验一边等于只锁半扇门）', () => {
   const files = [f('src/a.ts', Array.from({ length: 10 }, (_, i) => `const a${i} = ${i}`))];
-  const low = classifyTrigger({ available: true, files }, { thresholds: { volume: 100 } });
-  assert.equal(low.trigger, false, '低于阈值不该触发');
-  const high = classifyTrigger({ available: true, files }, { thresholds: { volume: 5 } });
+  // 关掉 code 兜底，单独验 volume 这一条的边界。
+  // 不关的话「低于阈值不触发」在「改代码就评审」的策略下已不成立（会被兜底触发），
+  // 那条断言就从「验边界」退化成「验策略」，测不到它本来要测的东西。
+  const isolate = { reviewAnyCodeChange: false };
+  const low = classifyTrigger({ available: true, files }, { ...isolate, thresholds: { volume: 100 } });
+  assert.equal(low.trigger, false, '低于阈值不该由 volume 触发');
+  const high = classifyTrigger({ available: true, files }, { ...isolate, thresholds: { volume: 5 } });
   assert.equal(high.trigger, true, '高于阈值必须触发');
 });
 
