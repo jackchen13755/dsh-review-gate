@@ -219,3 +219,67 @@ test('长跑模拟：200 会话 × 50 回合后状态不无限增长', async () 
   assert.ok(Object.keys(st.budgets.sessionSteers).length <= LIMITS.sessions,
     `sessionSteers 必须被限制在 ${LIMITS.sessions} 以内，实际 ${Object.keys(st.budgets.sessionSteers).length}`);
 });
+
+// ============================================================ 预算不得先于评审被扣
+
+test('评审已发起但结果未回：不该 steer，也不该扣预算（主动取证不该被罚）', async () => {
+  clearGateState();
+  applyConfig({ gate: true, gateMaxSteersPerTurn: 1, gateMaxSteersPerSession: 1 });
+
+  const { reveal } = await (async () => {
+    // 构造：本回合调过 dsh_code_review，但没有 tool/result（结果未回）
+    const events = [
+      { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'dsh_code_review', arguments: '{}' } },
+      { type: 'tool/result', data: { turn: 1, step: 2, message: { role: 'tool', source: { kind: 'tool', callId: 'other' }, content: [] } } },
+    ];
+    return { reveal: events };
+  })();
+
+  const steered = [];
+  const agent = {
+    id: 'await-agent',
+    session: { id: 'await-sess', header: { cwd: '/tmp/x', delegationDepth: 0 }, snapshotEvents: () => reveal },
+    steer: (m) => steered.push(m),
+  };
+
+  const text = await handleTurnStopping(
+    { agent, turn: 1 },
+    {
+      collectDiff: async () => ({
+        available: true, digest: 'AW1',
+        files: [{ path: 'package.json', status: 'M', added: ['x'], removed: [] }],
+        totals: { added: 1, removed: 0 },
+      }),
+      readJournal: async () => ({ verdict: 'unknown' }),
+      budgetKey: 'pre-step', // 回合进行中的检查点才容忍「已发起未完成」
+    },
+  );
+
+  assert.equal(text, undefined, '评审已发起、正在等结果时不该再 steer');
+  assert.equal(steered.length, 0);
+});
+
+test('对照：根本没调评审 → 仍然要拦（不能因为上面那条把该拦的放过）', async () => {
+  clearGateState();
+  applyConfig({ gate: true, gateMaxSteersPerTurn: 1, gateMaxSteersPerSession: 1 });
+
+  const steered = [];
+  const agent = {
+    id: 'nocall-agent',
+    session: { id: 'nocall-sess', header: { cwd: '/tmp/x', delegationDepth: 0 }, snapshotEvents: () => [] },
+    steer: (m) => steered.push(m),
+  };
+  const text = await handleTurnStopping(
+    { agent, turn: 1 },
+    {
+      collectDiff: async () => ({
+        available: true, digest: 'NC1',
+        files: [{ path: 'package.json', status: 'M', added: ['x'], removed: [] }],
+        totals: { added: 1, removed: 0 },
+      }),
+      readJournal: async () => ({ verdict: 'unknown' }),
+    },
+  );
+  assert.ok(text, '没调评审必须拦');
+  assert.equal(steered.length, 1);
+});
