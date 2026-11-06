@@ -179,3 +179,53 @@ test('没有观察记录且非 git → 放行，并把 skipped 记为 no-diff', 
   assert.equal(text, undefined);
   assert.equal(agent.steered.length, 0);
 });
+
+// ------------------------------------------------------------ 新增 vs 修改（structural 在降级模式下的前提）
+
+test('降级模式：文件原本不存在 → 记为 A（新增），structural 才能触发', async () => {
+  clearObserved();
+  recordWrite('new-file', '/repo/lib/newmod.js');
+  const snap = await observedSnapshot('new-file', {
+    readFile: async () => { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; },
+    exists: async () => false, // 文件不存在
+    cwd: '/repo',
+  });
+  assert.equal(snap.files[0].status, 'A', '新建的文件必须记成 A，否则 structural 永不触发');
+});
+
+test('降级模式：文件本来就有 → 记为 M（修改），不误判为新增', async () => {
+  clearObserved();
+  recordWrite('mod-file', '/repo/lib/a.js');
+  const snap = await observedSnapshot('mod-file', {
+    readFile: async () => 'const a = 1',
+    exists: async () => true,
+    cwd: '/repo',
+  });
+  assert.equal(snap.files[0].status, 'M', '改一行代码不等于新增文件');
+});
+
+test('降级模式：新增代码文件 → 真的能命中 structural（这是本轮修的缺口）', async () => {
+  const { classifyTrigger } = await import('../lib/trigger.js');
+  clearObserved();
+  recordWrite('struct', '/repo/lib/brand-new.js');
+  const snap = await observedSnapshot('struct', {
+    readFile: async () => { throw new Error('ENOENT'); },
+    exists: async () => false,
+    cwd: '/repo',
+  });
+  const cls = classifyTrigger(snap);
+  assert.ok(cls.reasons.includes('structural'), `应命中 structural，实际: ${cls.reasons.join(',')}`);
+});
+
+test('降级模式：新增非代码文件（.md）→ 不命中 structural', async () => {
+  const { classifyTrigger } = await import('../lib/trigger.js');
+  clearObserved();
+  recordWrite('struct-md', '/repo/docs/note.md');
+  const snap = await observedSnapshot('struct-md', {
+    readFile: async () => { throw new Error('ENOENT'); },
+    exists: async () => false,
+    cwd: '/repo',
+  });
+  const cls = classifyTrigger(snap);
+  assert.equal(cls.reasons.includes('structural'), false, '文档新增不该要求 lens');
+});
