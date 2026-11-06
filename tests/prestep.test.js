@@ -79,7 +79,8 @@ test('pre-step：刚写完文件的下一步不介入（给 agent 主动取证�
     '刚写完就拦会在 agent 正要调评审的那一刻抢先介入，反而制造它本想避免的返工');
 });
 
-test('pre-step：连续多步都没评审 → 才介入', async () => {
+test('pre-step：连续多步都没评审 → 才介入（阈值由常量驱动）', async () => {
+  const { QUIET_STEPS_BEFORE_GATE: Q } = await import('../lib/observed.js');
   clearGateState(); clearObserved(); applyConfig({ gate: true });
   const { ctx, handlers } = makeCtx();
   apply(ctx, { gate: true });
@@ -87,10 +88,12 @@ test('pre-step：连续多步都没评审 → 才介入', async () => {
 
   const agent = makeAgent('ps-quiet2');
   recordWrite('ps-quiet2', '/repo/package.json', { created: false });
-  // 第 1 步让路
-  await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
-  assert.equal(agent.steered.length, 0);
-  // 第 2 步应当介入
+  // 窗口内的每一步都让路
+  for (let i = 1; i < Q; i += 1) {
+    await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
+    assert.equal(agent.steered.length, 0, `第 ${i} 步仍在窗口内，不该拦`);
+  }
+  // 达到阈值才介入
   await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
   assert.ok(agent.steered.length >= 1, '过了窗口期仍未评审，就该介入');
 });
@@ -101,10 +104,12 @@ test('pre-step：新一轮写入会重置窗口（每次改动都重新给机会
   apply(ctx, { gate: true });
   const pre = handlers.get('agent/pre-step');
 
+  const { QUIET_STEPS_BEFORE_GATE: Q } = await import('../lib/observed.js');
   const agent = makeAgent('ps-reset');
   recordWrite('ps-reset', '/repo/a/package.json', { created: false });
-  await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
-  await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
+  for (let i = 0; i < Q; i += 1) {
+    await pre({ agent, turn: 1 }, async () => ({ kind: 'enter' }));
+  }
   const afterFirst = agent.steered.length;
   assert.ok(afterFirst >= 1, '首轮应已介入');
 
