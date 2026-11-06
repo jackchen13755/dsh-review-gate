@@ -42,7 +42,16 @@ DSH（DeepSeek Harness）插件。当一轮改动命中「判定类 / 配置类�
 | `security` | 路径含 `auth/secret/token/crypto/credential/permission/guard` |
 | `public-api` | 新增或删除行命中 `export function/interface/type/const/class` |
 | `deletion` | 删除了文件，或删除行数 ≥ 阈值（默认 20） |
+| `structural` | **新增或删除代码文件**（= 动了模块边界），除评审外还要求跑 `lens` |
 | `volume` | 总改动行数 ≥ 阈值（默认 120） |
+
+### 结构性改动为什么额外要求 `lens`
+
+新增/删除代码文件等于动了模块边界，而「模块划分是否合理」**从单个文件里看不出来**，只能从依赖图上看。所以这一类除了 `dsh_code_review`，还要求本回合跑过 `lens`（`impact` / `circular` / `metrics`），否则判定为未评审（`no-lens`）。
+
+依据是实测：`lens` 的工具描述里写着 PRIMARY TOOL、系统提示里也有 MUST 段落，但主会话 + 11 个子 agent 调用数为 **0**。写「应该用」不产生行为，把它变成流程里绕不过去的一步才行。
+
+lens 调用**失败不算数**（与评审同样要求成功）；非结构性改动不受影响，避免变成噪音。
 
 **明确不拦**：纯 `.md` 且不含判定/API；纯注释与空白；锁文件、`dist/`、`node_modules/`、`CHANGELOG`；`ignoreGlobs` 命中。
 
