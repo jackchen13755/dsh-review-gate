@@ -45,6 +45,9 @@ const commentDiff = (digest = 'C1') => ({
 });
 
 function setup(overrides = {}) {
+  // 默认 steer=false（1.0.9+ 让模型无法自己触发评审）；既有用例断言的是推回行为，
+  // 所以这里显式打开 steer，另有一条用例专门钉默认值。
+  overrides = { steer: true, ...overrides };
   clearGateState();
   applyConfig({ gate: true, gateMaxSteersPerTurn: 1, gateMaxSteersPerSession: 3, ...overrides });
 }
@@ -182,18 +185,45 @@ test('门禁总开关关掉 → 完全不介入', async () => {
   assert.equal(text, undefined);
 });
 
-test('子 agent 默认也拦（盲区：它的 write 不在主会话观察记录里）', async () => {
+test('默认不推回：命中触发规则也只记状态（1.0.9+ 模型无法自己触发 /review）', async () => {
+  setup({ steer: false });
+  const agent = makeAgent({ events: [] });
+  const text = await handleTurnStopping(
+    { agent, turn: 1 },
+    { collectDiff: async () => configDiff('NS1'), readJournal: journalUnknown },
+  );
+  assert.equal(text, undefined, '不该返回推回文本');
+  assert.equal(agent.steered.length, 0, '不该调用 agent.steer');
+  const st = statusOf(agent.id).last;
+  assert.equal(st.needsManualReview, true, '状态里必须标出「需要人工 /review」');
+  assert.match(String(st.hint), /\/review/);
+});
+
+test('子 agent 一律不拦：评审工具被禁在子 Agent 之外，它没有可用载体', async () => {
+  // 2026-11-10 契约变更：dsh_code_review 只允许主会话调用（lib/review-tool-policy.js），
+  // 子 Agent 里没有任何被接受的评审载体——再拦就是把它推进一个永远满足不了的要求。
   setup();
   const agent = makeAgent({ depth: 1, events: [] });
   const text = await handleTurnStopping(
     { agent, turn: 1 },
     { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
   );
-  assert.ok(text, '子 agent 改了配置类文件也必须被拦');
-  assert.equal(agent.steered.length, 1);
+  assert.equal(text, undefined, '子 agent 不应被推回去要求一个拿不到的工具');
+  assert.equal(agent.steered.length, 0);
 });
 
-test('显式关掉 gateSubagents 则不拦（省评审费，但盲区回来）', async () => {
+test('旧开关 gateSubagents 已删除：传 true 也不再拦子 agent（不留半生效的配置）', async () => {
+  setup({ gateSubagents: true });
+  const agent = makeAgent({ depth: 1, events: [] });
+  const text = await handleTurnStopping(
+    { agent, turn: 1 },
+    { collectDiff: async () => configDiff('D1'), readJournal: journalUnknown },
+  );
+  assert.equal(text, undefined, '配置项已删，传了也不能改变契约');
+  assert.equal(agent.steered.length, 0);
+});
+
+test('子 agent 不拦（契约）', async () => {
   setup({ gateSubagents: false });
   const agent = makeAgent({ depth: 1, events: [] });
   const text = await handleTurnStopping(
@@ -237,22 +267,8 @@ test('深度探测的对照：同样关掉 gateSubagents，主会话必须仍被
   assert.ok(text, '主会话不受 gateSubagents 影响');
 });
 
-test('子 agent 的预算独立计量（不占主会话额度）', async () => {
-  setup({ gateMaxSteersPerTurn: 1, gateMaxSteersPerSession: 3 });
-  // 主会话先烧掉 3 次
-  for (let i = 0; i < 3; i += 1) {
-    const a = makeAgent({ id: 'main-1', sid: 'main-sess', events: [] });
-    await handleTurnStopping({ agent: a, turn: i + 1 }, { collectDiff: async () => configDiff(`M${i}`), readJournal: journalUnknown });
-  }
-  const main = makeAgent({ id: 'main-1', sid: 'main-sess', events: [] });
-  const mainText = await handleTurnStopping({ agent: main, turn: 9 }, { collectDiff: async () => configDiff('M9'), readJournal: journalUnknown });
-  assert.equal(mainText, undefined, '主会话额度应已耗尽');
-
-  // 子 agent 是另一个会话 id，额度独立，仍应被拦
-  const sub = makeAgent({ id: 'sub-1', sid: 'sub-sess', depth: 1, events: [] });
-  const subText = await handleTurnStopping({ agent: sub, turn: 1 }, { collectDiff: async () => configDiff('S1'), readJournal: journalUnknown });
-  assert.ok(subText, '子 agent 不该被主会话的额度连坐');
-});
+// 子 agent 不再参与门禁（契约），所以「子 agent 预算独立计量」这个用例失去主体；
+// 预算仍按会话 id 分桶（见下面的会话总额兜底用例），只是不再有子 agent 这一路。
 
 // ------------------------------------------------------------ 健壮性
 

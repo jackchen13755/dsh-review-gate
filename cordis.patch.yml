@@ -13,6 +13,17 @@
       config:
         # 总开关。false = 完全不介入回合结束。
         gate: true
+        # 是否把回合推回去要求评审（默认 false）。
+        # 1.0.9+ 的 code-review 插件不再注册 dsh_code_review 工具，评审改为 /review 命令
+        # （用户触发，模型无法自己调），继续推回等于要求模型做一件它做不到的事。
+        # 改成只记录状态 + 在结论里提醒用户 /review。想恢复旧行为设 true。
+        steer: false
+        # 自动评审（默认 true）：判定需要评审时，门禁用 ctx.commands.execute 替模型执行
+        # `/review 审查未提交的更改`——等价于用户敲命令、不经过模型。发起失败则退回
+        # 「只记录 + 提示」。设 false 就完全回到人工 /review。
+        autoReview: true
+        # 自动评审传给 /review 的输入（自定义审查重点时改这里）。
+        autoReviewInput: 审查未提交的更改
         # 每回合最多把 agent 拉回几次（评审较贵，默认只催 1 次）。
         gateMaxSteersPerTurn: 1
         # 每会话总额（必须有：payload.turn 可能缺失，只靠 turn 计数会被反复重置）。
@@ -35,9 +46,6 @@
         # 低于这些阈值的改动不触发，避免把纯排版改动也拦下来。
         removalThreshold: 20
         volumeThreshold: 120
-        # 子 agent 是否也单独拦（默认 true）。
-        # 为什么默认开：子 agent 完全可能自己改配置/安全相关文件，而主会话的观察记录里
-        # 没有它的 write（尤其在非 git 目录下），这个组合是盲区。代价是同一份改动可能
-        # 被子 agent 与主会话各判一次、多花一次评审——用 gateMaxSteersPerSession 兜住。
-        # 想省评审费可以关掉，但要知道盲区回来了。
-        gateSubagents: true
+        # 子 agent 不参与门禁（契约，非开关）：评审工具 dsh_code_review 在子 Agent 里
+        # 被硬拦（lib/review-tool-policy.js），它没有可用的评审载体。子 agent 的改动由
+        # 主会话收口时统一评审。旧配置项 gateSubagents 已删除，避免「配置说开、实际不开」。

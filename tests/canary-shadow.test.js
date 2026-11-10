@@ -38,7 +38,6 @@ const deps = () => ({ collectDiff: async () => configDiff('D1'), readJournal: as
 function reset({ canaryShadow = true } = {}) {
   applyConfig({
     gate: true,
-    gateSubagents: true,
     gateMaxSteersPerTurn: 1,
     gateMaxSteersPerSession: 3,
     canaryShadow,

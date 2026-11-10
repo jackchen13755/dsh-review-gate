@@ -59,15 +59,17 @@ test('注入一个 review-first 分节，且位置在工具指引之前', () => 
   assert.equal(typeof sec.text, 'function', 'text 应为函数，便于按配置动态返回');
 });
 
-test('提示词必须讲清「会被推回、那一轮是白费」，并给出按改动类型的做法', () => {
+test('提示词必须讲清「评审改由 /review 命令触发、不会再推回」，并给出按改动类型的做法', () => {
   applyConfig({ gate: true });
   const { ctx, sections } = makeCtx();
   apply(ctx, { gate: true });
   const text = sections.find((s) => s.name === 'review-gate:review-first').text();
 
-  assert.match(text, /推回|白费/, '必须说明代价，否则模型没有动机提前做');
-  assert.match(text, /review_brief/, '要给出具体工具名');
-  assert.match(text, /dsh_code_review/, '有独立审查者时优先用它');
+  assert.match(text, /\/review/, '必须写明评审由 /review 命令触发');
+  assert.match(text, /不会再把回合推回|不会.*推回/, '必须说明不再推回，否则模型会做无用的自救');
+  assert.doesNotMatch(text, /dsh_code_review/, '1.0.9+ 已无该工具，提示词不能再提');
+  assert.match(text, /提醒用户/, '要告诉模型：收尾时提醒用户跑 /review');
+  assert.doesNotMatch(text, /review_brief/, '自有取证工具已删，不能再出现在提示词里');
   assert.match(text, /lens/, '结构性改动要提 lens');
   assert.match(text, /impact.*circular.*metrics/, 'lens 要具体到三个动作');
   assert.match(text, /package\.json/, '要举出配置类文件的具体例子');

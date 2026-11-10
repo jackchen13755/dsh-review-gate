@@ -38,7 +38,6 @@ const REPO_ROOT = '/tmp/plugin-repo';
 function reset() {
   applyConfig({
     gate: true,
-    gateSubagents: true,
     gateMaxSteersPerTurn: 1,
     gateMaxSteersPerSession: 3,
     canaryShadow: true,

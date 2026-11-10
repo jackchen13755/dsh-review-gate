@@ -64,9 +64,31 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 
 **明确不拦**：纯 `.md` 且不含判定/API；纯注释与空白；锁文件、`dist/`、`node_modules/`、`CHANGELOG`；`ignoreGlobs` 命中。
 
-### 两个评审工具不等价：`dsh_code_review` 是主干，`review_brief` 只能补位
+### 评审载体：`/review` 命令（1.0.9+ 起；工具形态已不存在）
 
-`dsh_code_review` 会 spawn 一个独立的 reviewer 子 Agent，结论独立；`review_brief` 是本插件自带的退路，它**只把准则与 diff 摆出来，审查由调用者自己完成**（见 `lib/brief.js` 首段）。拿后者交差，本质是自审。
+`@michengai/dsh-code-review` **1.0.9+ 不再注册 `dsh_code_review` 工具**，改为斜杠命令 `/review`、`/review-cancel`、`/review-status`：
+命令是**用户**触发的，模型无法自己调用。审查完成后它把报告作为用户消息注入会话
+（`source.kind = 'michengai-code-review'`，成功以 `Here is the completed code review report` 开头），
+这条消息由宿主写入会话日志，本插件把它与（旧版的）工具调用并列为评审证据。
+本插件自带的 `review_brief` 取证工具已于 2026-11-10 **删除**——它只把准则与 diff 摆出来、审查由调用者自己完成，本质是自审。
+
+### 自动评审（`autoReview: true`，默认开）
+
+模型自己调不了 `/review`，但**插件可以**：宿主提供
+`ctx.commands.execute(agent, line, attachments, signal)`——文档原文「解析并执行已知命令，**不经过模型**」。
+门禁在判定「需要评审」时直接执行 `/review 审查未提交的更改`，效果等于你亲手敲命令，但不需要人工介入：
+
+| 情况 | 行为 |
+|---|---|
+| 判定需要评审 | 自动执行 `/review …`，状态记 `autoReview.started = true`，**不推回** |
+| 命令未解析（插件没装） | 退回「只记录」，`failure = command-not-resolved`，绝不假装已评审 |
+| 命令抛错 | 同上，保留 `failure` 原文 |
+| `autoReview: false` | 回到人工 `/review` |
+
+默认**不再把回合推回**（`steer: false`）：推回只能要求模型做一件它做不到的事。
+
+旧版遗留的硬约束（`lib/review-tool-policy.js`，当前休眠）：**`dsh_code_review` 只允许在主会话调用**，任何子 Agent 里调用都会被 `ctx.tools.guard()` 直接拒绝（理由串 `recursion-cut: ...`，可用 `DSH_*` 日志 grep 取证）。
+原因：该工具会 spawn 独立审查子 Agent，而审查子继承全局 `AGENTS.md` 的「开工先叫人」，可能反过来召唤 Agency 专家；专家又被要求「交付前跑一次评审」→ 再起审查子 → 成环（实测跑到 `delegationDepth=4`）。把工具限制在主会话，环的闭合边就不存在。
 
 所以判定时按「本会话有没有前者可用」分流。可用性的判据是**本会话里成功跑通过** `dsh_code_review`（有 `tool/call` 且有成功结果）：
 
@@ -76,8 +98,7 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 | 情形 | 判定 | 为什么 |
 |---|---|---|
 | 真调了 `dsh_code_review` | 通过（`ok`） | 主干路径 |
-| 调了 `review_brief`，且本会话有前者 | **拦，`weak-tool`** | 有独立评审却用自审顶替 |
-| 调了 `review_brief`，本会话从未出现前者 | 放行，标 `brief-self-review` | 部分子会话（如专家子会话）不加载前者，拦了会把人卡死 |
+| 没调用 `dsh_code_review` | 拦 | 唯一被接受的评审证据 |
 
 `brief-self-review` 是**如实标注**而不是等价通过：它不会记成 `ok`，在 `review_gate_status` 里能看出这次是自审。
 
@@ -119,7 +140,7 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 - 每回合最多推回 **1** 次；每会话最多 **3** 次（必须有会话级：`payload.turn` 可能缺失，只靠回合计数会被反复重置 —— 这个坑上游插件实测踩到过，被推回 4 次）。
 - 预算耗尽时**如实放行**并在日志说明，不静默。
 - fail-open 的情形：diff 不可得（非 git 仓 / git 超时）、拿不到会话事件源、工具没装、门禁被关。理由：**「永远无法收工」比「漏检一次」更糟**。
-- 子 agent **默认也单独拦**（`gateSubagents: true`）。理由：子 agent 完全可能自己改配置或安全相关文件，而主会话的观察记录里**没有**它的 write（非 git 目录下尤其如此）——这个组合曾经是盲区。代价是同一份改动可能被子 agent 与主会话各判一次、多花一次评审，用 `gateMaxSteersPerSession` 兜住；预算按会话独立计量，子 agent 不会占用主会话额度。想省评审费可以关掉，但要知道盲区会回来。
+- 子 agent **一律不参与门禁**（契约，不是开关）：`dsh_code_review` 在子 Agent 里被硬拦，它没有可用的评审载体——再拦只会把它推进一个永远满足不了的要求（无限推回）。子 agent 的改动由主会话收口时统一评审。旧配置项 `gateSubagents` 已删除，避免「配置说开、实际不开」。
 
 ## 关闭
 
@@ -148,7 +169,7 @@ dsh plugin add github:jackchen13755/dsh-review-gate
 dsh plugin add link:/path/to/dsh-review-gate
 ```
 
-配置写在 `cordis.patch.yml` 的 `config` 段，可调项：`gate`、`gateMaxSteersPerTurn`、`gateMaxSteersPerSession`、`removalThreshold`、`volumeThreshold`、`gateSubagents`、`reviewAnyCodeChange`、`canaryShadow`、`ignoreGlobs`、`extraTriggerGlobs`、`timeoutMs`。
+配置写在 `cordis.patch.yml` 的 `config` 段，可调项：`gate`、`gateMaxSteersPerTurn`、`gateMaxSteersPerSession`、`removalThreshold`、`volumeThreshold`、`reviewAnyCodeChange`、`canaryShadow`、`ignoreGlobs`、`extraTriggerGlobs`、`timeoutMs`。
 
 两个容易误读的点：
 

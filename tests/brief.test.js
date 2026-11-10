@@ -79,18 +79,7 @@ function makeAgent(sid, events) {
   };
 }
 
-test('用 review_brief 作为证据 → 也算已评审（专家子会话就靠这条路）', async () => {
-  clearGateState();
-  applyConfig({ gate: true });
-  const agent = makeAgent('brief-ok', [callEvent(1, 'review_brief', 'b1'), resultEvent(1, 'b1')]);
-  const text = await handleTurnStopping(
-    { agent, turn: 1 },
-    { collectDiff: async () => cfgDiff('B1'), readJournal: async () => ({ verdict: 'unknown' }) },
-  );
-  assert.equal(text, undefined, 'review_brief 成功也必须被认作评审证据');
-});
-
-test('两个工具都没用 → 仍然拦', async () => {
+test('没有调 dsh_code_review → 拦', async () => {
   clearGateState();
   applyConfig({ gate: true });
   const agent = makeAgent('brief-none', []);
@@ -99,20 +88,6 @@ test('两个工具都没用 → 仍然拦', async () => {
     { collectDiff: async () => cfgDiff('B2'), readJournal: async () => ({ verdict: 'unknown' }) },
   );
   assert.ok(text);
-});
-
-test('review_brief 调用失败 → 不算证据', async () => {
-  clearGateState();
-  applyConfig({ gate: true });
-  const agent = makeAgent('brief-fail', [
-    callEvent(1, 'review_brief', 'b3'),
-    { type: 'tool/result', data: { turn: 1, step: 2, message: { role: 'tool', source: { kind: 'tool', callId: 'b3' }, isError: true, content: [] } } },
-  ]);
-  const text = await handleTurnStopping(
-    { agent, turn: 1 },
-    { collectDiff: async () => cfgDiff('B3'), readJournal: async () => ({ verdict: 'unknown' }) },
-  );
-  assert.ok(text, '失败的工具调用不能当评审证据');
 });
 
 // ------------------------------------------------------------ 仓库根反推 + 取不到就抛错
@@ -140,32 +115,4 @@ test('repoRootFromObserved：没有观察记录时返回 undefined', async () =>
   const { clearObserved, repoRootFromObserved } = await import('../lib/observed.js');
   clearObserved();
   assert.equal(await repoRootFromObserved('nothing', { exists: async () => true }), undefined);
-});
-
-test('review_brief 取不到改动时必须抛错，不能软返回（否则造成假阳性放行）', async () => {
-  const { apply } = await import('../lib/index.js');
-  const { applyConfig } = await import('../lib/config.js');
-  applyConfig({ gate: true });
-
-  let briefTool;
-  const ctx = {
-    on: () => () => {},
-    effect: (fn) => {
-      const d = fn();
-      return () => (typeof d === 'function' ? d() : undefined);
-    },
-    tools: {
-      register: (t) => { if (t && t.name === 'review_brief') briefTool = t; return () => {}; },
-    },
-    logger: { info() {}, warn() {} },
-  };
-  apply(ctx, { gate: true });
-  assert.ok(briefTool, 'review_brief 必须注册上');
-
-  // cwd 指向一个确定不是 git 仓库的目录，且没有观察记录
-  await assert.rejects(
-    () => briefTool.execute({ input: '' }, { agent: { session: { id: 'no-git', header: { cwd: '/tmp' } } } }),
-    /无法取得改动/,
-    '取不到 diff 必须抛错——成功的工具调用会被门禁当作评审证据',
-  );
 });
