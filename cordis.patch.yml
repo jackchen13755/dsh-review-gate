@@ -23,6 +23,10 @@
         # 「只记录 + 提示」。设 false 就完全回到人工 /review。
         autoReview: true
         # 自动评审传给 /review 的输入（自定义审查重点时改这里）。
+        # 给 /review 传 `--cwd <写入根>`（自研 fork 支持）。用第三方版本时设 false，
+        # 门禁会退化为「拒绝自动评审 + 提示去目标目录开会话」。
+        autoReviewCwd: true
+        # 自动评审传给 /review 的输入（自定义审查重点时改这里）。
         autoReviewInput: 审查未提交的更改
         # 每回合最多把 agent 拉回几次（评审较贵，默认只催 1 次）。
         gateMaxSteersPerTurn: 1

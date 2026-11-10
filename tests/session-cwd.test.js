@@ -207,8 +207,27 @@ test('真实场景回归：改动在工作树子目录时，取证用写入根�
   assert.deepEqual(seen, ['/w/repo/.worktrees/feat'], '必须按写入根取证');
 });
 
-test('改动在互不相干的目录 → 拒绝自动评审并给出目标路径', async () => {
+test('改动在互不相干的目录 → 用 --cwd 指向写入根发起评审', async () => {
   setup();
+  const agent = makeAgent({ cwd: '/w/repo' });
+  const lines = [];
+  await handleTurnStopping(
+    { agent, turn: 1 },
+    {
+      liveCwd: () => '/w/repo',
+      gitRoot: async () => '/w/repo',
+      repoRoot: async () => '/w/repo-wt/feat',
+      collectDiff: async () => configDiff(),
+      readJournal: journalUnknown,
+      runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
+    },
+  );
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /--cwd "\/w\/repo-wt\/feat"/, '必须把写入根作为 --cwd 传下去');
+});
+
+test('不支持 --cwd 时（autoReviewCwd=false）→ 拒绝并给出目标路径', async () => {
+  setup({ autoReviewCwd: false });
   const agent = makeAgent({ cwd: '/w/repo' });
   let reviewed = false;
   await handleTurnStopping(
@@ -228,10 +247,10 @@ test('改动在互不相干的目录 → 拒绝自动评审并给出目标路径
   assert.match(String(st.hint), /\/w\/repo-wt\/feat/);
 });
 
-test('真实场景回归：改动在主仓库的嵌套工作树里 → 拒绝自动评审（不再审主区域）', async () => {
+test('真实场景回归：改动在主仓库的嵌套工作树里 → 用 --cwd 审那棵工作树', async () => {
   setup();
   const agent = makeAgent({ cwd: '/w/repo' });
-  let reviewed = false;
+  const lines = [];
   await handleTurnStopping(
     { agent, turn: 1 },
     {
@@ -240,11 +259,9 @@ test('真实场景回归：改动在主仓库的嵌套工作树里 → 拒绝自
       repoRoot: async () => '/w/repo/.worktrees/feat',
       collectDiff: async () => configDiff(),
       readJournal: journalUnknown,
-      runCommand: async () => { reviewed = true; return { kind: 'success' }; },
+      runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
     },
   );
-  assert.equal(reviewed, false, '第三方按会话目录取 diff，必然审错树');
-  const st = statusOf(agent.id).last;
-  assert.equal(st.autoReview?.failure, 'writes-outside-session-cwd');
-  assert.match(String(st.hint), /\.worktrees\/feat/);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /--cwd "[^"]*\.worktrees\/feat"/, '必须审写入根，而不是主仓库');
 });
