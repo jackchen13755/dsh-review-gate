@@ -14,6 +14,15 @@ const reportEvent = (text, sourceKind = REPORT_SOURCE_KIND) => ({
   },
 })
 
+/** 真实会话事件形状（2026-11-10 实测）：content / source 直接在 data 上。 */
+const realReportEvent = (text, sourceKind = REPORT_SOURCE_KIND) => ({
+  type: 'user/message',
+  data: {
+    content: [{ type: 'text', text }],
+    source: { kind: sourceKind },
+  },
+})
+
 const writeCall = (name = 'edit') => ({ type: 'tool/call', data: { turn: 4, step: 1, callId: 'c1', name } })
 const OTHER = { type: 'message', data: { message: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] } } }
 
@@ -80,3 +89,39 @@ test('畸形消息（无 content / content 非数组）不抛', () => {
   ]
   assert.equal(findReviewReport(events).completed, false)
 })
+
+test('真实事件形状（data.content + data.source）必须能识别', () => {
+  const events = [realReportEvent('Here is the completed code review report:\n\n## ok')]
+  assert.equal(findReviewReport(events).completed, true);
+  assert.equal(coverageFromReport(events).reviewed, true);
+});
+
+test('同一版 diff：先成功后失败 → 仍算覆盖（不能越失败越重试）', () => {
+  const events = [
+    realReportEvent('Here is the completed code review report: ok'),
+    realReportEvent('The code review did not complete: timeout'),
+  ];
+  assert.deepEqual(coverageFromReport(events), { reviewed: true, reason: 'report-covers-diff' });
+});
+
+test('成功报告之后又改代码、之后只有失败报告 → 不算覆盖', () => {
+  const events = [
+    realReportEvent('Here is the completed code review report: ok'),
+    writeCall('edit'),
+    realReportEvent('The code review did not complete: timeout'),
+  ];
+  assert.equal(coverageFromReport(events).reason, 'report-failed');
+});
+
+test('成功报告之后又改代码、没有新报告 → changed-after-report', () => {
+  const events = [
+    realReportEvent('Here is the completed code review report: ok'),
+    writeCall('write'),
+  ];
+  assert.equal(coverageFromReport(events).reason, 'changed-after-report');
+});
+
+test('只有失败报告 → report-failed（不能当已评审）', () => {
+  const events = [writeCall('edit'), realReportEvent('The code review did not complete: x')];
+  assert.equal(coverageFromReport(events).reason, 'report-failed');
+});
