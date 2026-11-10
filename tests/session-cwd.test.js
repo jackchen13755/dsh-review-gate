@@ -153,11 +153,27 @@ test('isInside：相等 / 子路径 / 兄弟目录', () => {
   for (const bad of [undefined, null, '', 42]) assert.equal(isInside(bad, '/a'), false);
 });
 
-test('写入根在会话目录的另一个工作树里 → mismatch（第三方必审错树）', () => {
-  const r = resolveReviewRoot({ sessionCwd: '/w/repo', observedRoot: '/w/repo/.worktrees/feat' });
+test('嵌套工作树（<repo>/.worktrees/feat）→ 仍是 mismatch：git 根不同，主仓库 diff 看不到', () => {
+  const r = resolveReviewRoot({
+    sessionCwd: '/w/repo',
+    sessionRoot: '/w/repo',
+    observedRoot: '/w/repo/.worktrees/feat',
+  });
   assert.equal(r.root, '/w/repo/.worktrees/feat');
   assert.equal(r.source, 'observed');
-  assert.equal(r.mismatch, false, 'worktree 在主仓库目录之下，不算互不相干');
+  assert.equal(r.mismatch, true, 'toplevel 不同就是不同工作树（真实踩过：主仓库 .gitignore 忽略 .worktrees/）');
+  assert.equal(r.basis, 'git-root');
+});
+
+test('同一个 git 根 → 不算 mismatch', () => {
+  const r = resolveReviewRoot({ sessionCwd: '/w/repo/src', sessionRoot: '/w/repo', observedRoot: '/w/repo' });
+  assert.equal(r.mismatch, false);
+});
+
+test('拿不到会话 git 根时退化为路径判断（已知局限会漏嵌套工作树）', () => {
+  const r = resolveReviewRoot({ sessionCwd: '/w/repo', observedRoot: '/w/repo/.worktrees/feat' });
+  assert.equal(r.basis, 'path');
+  assert.equal(r.mismatch, false);
 });
 
 test('写入根与会话目录互不包含（例：主仓库 vs 平级 worktree）→ mismatch', () => {
@@ -166,11 +182,11 @@ test('写入根与会话目录互不包含（例：主仓库 vs 平级 worktree�
 });
 
 test('没有写入根 → 退回会话目录，不算 mismatch', () => {
-  assert.deepEqual(resolveReviewRoot({ sessionCwd: '/w/repo' }), { root: '/w/repo', source: 'session', mismatch: false });
+  assert.deepEqual(resolveReviewRoot({ sessionCwd: '/w/repo' }), { root: '/w/repo', source: 'session', mismatch: false, basis: 'none' });
 });
 
 test('两边都没有 → none', () => {
-  assert.deepEqual(resolveReviewRoot({}), { root: undefined, source: 'none', mismatch: false });
+  assert.deepEqual(resolveReviewRoot({}), { root: undefined, source: 'none', mismatch: false, basis: 'none' });
 });
 
 test('真实场景回归：改动在工作树子目录时，取证用写入根而不是会话目录', async () => {
@@ -181,6 +197,7 @@ test('真实场景回归：改动在工作树子目录时，取证用写入根�
     { agent, turn: 1 },
     {
       liveCwd: () => '/w/repo',
+      gitRoot: async () => '/w/repo',
       repoRoot: async () => '/w/repo/.worktrees/feat',
       collectDiff: async (cwd) => { seen.push(cwd); return configDiff(); },
       readJournal: journalUnknown,
@@ -198,6 +215,7 @@ test('改动在互不相干的目录 → 拒绝自动评审并给出目标路径
     { agent, turn: 1 },
     {
       liveCwd: () => '/w/repo',
+      gitRoot: async () => '/w/repo',
       repoRoot: async () => '/w/repo-wt/feat',
       collectDiff: async () => configDiff(),
       readJournal: journalUnknown,
@@ -208,4 +226,25 @@ test('改动在互不相干的目录 → 拒绝自动评审并给出目标路径
   const st = statusOf(agent.id).last;
   assert.equal(st.autoReview?.failure, 'writes-outside-session-cwd');
   assert.match(String(st.hint), /\/w\/repo-wt\/feat/);
+});
+
+test('真实场景回归：改动在主仓库的嵌套工作树里 → 拒绝自动评审（不再审主区域）', async () => {
+  setup();
+  const agent = makeAgent({ cwd: '/w/repo' });
+  let reviewed = false;
+  await handleTurnStopping(
+    { agent, turn: 1 },
+    {
+      liveCwd: () => '/w/repo',
+      gitRoot: async () => '/w/repo',
+      repoRoot: async () => '/w/repo/.worktrees/feat',
+      collectDiff: async () => configDiff(),
+      readJournal: journalUnknown,
+      runCommand: async () => { reviewed = true; return { kind: 'success' }; },
+    },
+  );
+  assert.equal(reviewed, false, '第三方按会话目录取 diff，必然审错树');
+  const st = statusOf(agent.id).last;
+  assert.equal(st.autoReview?.failure, 'writes-outside-session-cwd');
+  assert.match(String(st.hint), /\.worktrees\/feat/);
 });
