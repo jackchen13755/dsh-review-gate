@@ -140,3 +140,72 @@ test('两个会话各用各的目录，互不串味', async () => {
   await run(makeAgent({ id: 'b', cwd: '/w/b' }), '/w/b');
   assert.deepEqual(seen, ['/w/a', '/w/b']);
 });
+
+// ---------------------------------------------- 评审范围以「写过的文件」为准
+
+import { isInside, resolveReviewRoot } from '../lib/review-scope.js';
+
+test('isInside：相等 / 子路径 / 兄弟目录', () => {
+  assert.equal(isInside('/a/b', '/a/b'), true);
+  assert.equal(isInside('/a/b/c', '/a/b'), true);
+  assert.equal(isInside('/a/bc', '/a/b'), false, '前缀相同但不是子目录');
+  assert.equal(isInside('/a', '/a/b'), false);
+  for (const bad of [undefined, null, '', 42]) assert.equal(isInside(bad, '/a'), false);
+});
+
+test('写入根在会话目录的另一个工作树里 → mismatch（第三方必审错树）', () => {
+  const r = resolveReviewRoot({ sessionCwd: '/w/repo', observedRoot: '/w/repo/.worktrees/feat' });
+  assert.equal(r.root, '/w/repo/.worktrees/feat');
+  assert.equal(r.source, 'observed');
+  assert.equal(r.mismatch, false, 'worktree 在主仓库目录之下，不算互不相干');
+});
+
+test('写入根与会话目录互不包含（例：主仓库 vs 平级 worktree）→ mismatch', () => {
+  const r = resolveReviewRoot({ sessionCwd: '/w/repo', observedRoot: '/w/repo-wt/feat' });
+  assert.equal(r.mismatch, true);
+});
+
+test('没有写入根 → 退回会话目录，不算 mismatch', () => {
+  assert.deepEqual(resolveReviewRoot({ sessionCwd: '/w/repo' }), { root: '/w/repo', source: 'session', mismatch: false });
+});
+
+test('两边都没有 → none', () => {
+  assert.deepEqual(resolveReviewRoot({}), { root: undefined, source: 'none', mismatch: false });
+});
+
+test('真实场景回归：改动在工作树子目录时，取证用写入根而不是会话目录', async () => {
+  setup();
+  const agent = makeAgent({ cwd: '/w/repo' });
+  const seen = [];
+  await handleTurnStopping(
+    { agent, turn: 1 },
+    {
+      liveCwd: () => '/w/repo',
+      repoRoot: async () => '/w/repo/.worktrees/feat',
+      collectDiff: async (cwd) => { seen.push(cwd); return configDiff(); },
+      readJournal: journalUnknown,
+      runCommand: async () => ({ kind: 'success' }),
+    },
+  );
+  assert.deepEqual(seen, ['/w/repo/.worktrees/feat'], '必须按写入根取证');
+});
+
+test('改动在互不相干的目录 → 拒绝自动评审并给出目标路径', async () => {
+  setup();
+  const agent = makeAgent({ cwd: '/w/repo' });
+  let reviewed = false;
+  await handleTurnStopping(
+    { agent, turn: 1 },
+    {
+      liveCwd: () => '/w/repo',
+      repoRoot: async () => '/w/repo-wt/feat',
+      collectDiff: async () => configDiff(),
+      readJournal: journalUnknown,
+      runCommand: async () => { reviewed = true; return { kind: 'success' }; },
+    },
+  );
+  assert.equal(reviewed, false);
+  const st = statusOf(agent.id).last;
+  assert.equal(st.autoReview?.failure, 'writes-outside-session-cwd');
+  assert.match(String(st.hint), /\/w\/repo-wt\/feat/);
+});

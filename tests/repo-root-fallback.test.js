@@ -45,7 +45,7 @@ function reset() {
   clearGateState();
 }
 
-test('cwd 不是 git 仓库时，按反推的仓库根取证并照常推回评审', async () => {
+test('cwd 不是 git 仓库时，直接按写入根取证并照常推回评审', async () => {
   reset();
   const seen = [];
   const deps = {
@@ -62,7 +62,9 @@ test('cwd 不是 git 仓库时，按反推的仓库根取证并照常推回评�
 
   assert.ok(text, '反推仓库根之后应当照常推回评审（这正是用户反馈失效的那一步）');
   assert.equal(agent.steered.length, 1);
-  assert.deepEqual(seen, [NON_REPO, REPO_ROOT], '取证顺序必须是先 cwd、再仓库根');
+  // 2026-11-10 契约变更：范围改由「写过的文件」反推，直接取写入根，
+  // 不再先跑一次必然失败的 cwd（那也是「worktree 里改、评审看主区域」的根源）。
+  assert.deepEqual(seen, [REPO_ROOT], '直接按写入根取证');
   assert.deepEqual(statusOf('root-fallback').last.reasons, ['config']);
 });
 
