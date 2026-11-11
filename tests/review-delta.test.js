@@ -262,3 +262,212 @@ test('集成：变更文件超过 10 个 → hint 只点名 10 个并用「另�
   assert.match(status.last.hint, /另有 2 个/, '超过 10 个的部分必须折成数量');
   assert.match(status.last.hint, /不要全量重审/);
 });
+
+// ------------------------------------------------- 复审范围的写入时机与生命周期（R16 修正）
+//
+// 上面三条集成用例只覆盖「算得对」。下面三条覆盖「什么时候算、什么时候清」：
+//   a) 一条触发规则都没命中 → 根本不需要评审 → 不许留下 reviewScope；
+//   b) 有基线、真要评审 → narrow 且只含真正变了的那个文件；
+//   c) 这一轮评审完成后 → reviewScope 被消费掉，基线同时前移。
+
+test('集成：未命中任何触发规则的回合 → 不得凭基线写出 reviewScope', async () => {
+  setup();
+  // 先造一次成功评审：没有基线的话 reviewScope 本来就不会被算出来，这条就测不到。
+  const agent1 = makeAgent({ events: [callEvent(1), resultEvent(1)] });
+  await handleTurnStopping(
+    { agent: agent1, turn: 1 },
+    { collectDiff: async () => reviewDiff('D1', file('package.json', ['  "x": 1'])), readJournal: journalUnknown },
+  );
+  assert.equal(statusOf('s1').last?.reviewed, true, '前置：必须先有一次成功评审，否则没有基线');
+
+  // 第 2 回合：只改了一行注释（不命中任何触发规则），也没调评审。
+  const agent2 = makeAgent({ events: [] });
+  await handleTurnStopping(
+    { agent: agent2, turn: 2 },
+    { collectDiff: async () => reviewDiff('D2', file('src/a.js', ['// 只改了一行注释'])), readJournal: journalUnknown },
+  );
+
+  const status = statusOf('s1');
+  assert.deepEqual(status.last.reasons, [], '前置：这条改动确实不命中触发规则（否则测的是另一条路径）');
+  assert.equal(status.last.needsAgentReview, undefined, '前置：没进入「需要评审」分支');
+  assert.equal(
+    status.reviewScope,
+    null,
+    '未被要求评审的会话不该有一个算出来的窄范围（否则 review_gate_status 会凭空显示复审范围）',
+  );
+});
+
+test('集成：有基线后只改一个文件 → reviewScope 为 narrow 且只含该文件', async () => {
+  setup();
+  const agent1 = makeAgent({ events: [callEvent(1), resultEvent(1)] });
+  await handleTurnStopping(
+    { agent: agent1, turn: 1 },
+    {
+      collectDiff: async () => reviewDiff('D1', file('package.json', ['  "x": 1']), file('src/a.js', ['+one'])),
+      readJournal: journalUnknown,
+    },
+  );
+  assert.equal(statusOf('s1').last?.reviewed, true, '前置：第一回合必须记为已评审（否则没有基线）');
+
+  // 第 2 回合：package.json 原样、只有 src/a.js 变了（两个文件都在 diff 里）。
+  const agent2 = makeAgent({ events: [] });
+  const text = await handleTurnStopping(
+    { agent: agent2, turn: 2 },
+    {
+      collectDiff: async () => reviewDiff('D2', file('package.json', ['  "x": 1']), file('src/a.js', ['+one', '+two'])),
+      readJournal: journalUnknown,
+    },
+  );
+
+  const status = statusOf('s1');
+  assert.ok(text, '真要评审时必须真的拦下来（收窄范围不等于放行）');
+  assert.equal(status.last.needsAgentReview, true);
+  assert.deepEqual(status.reviewScope, { mode: 'narrow', files: ['src/a.js'], reason: 'changed' });
+  assert.match(status.last.hint, /src\/a\.js/);
+  assert.doesNotMatch(status.last.hint, /package\.json/, '没变的文件不得进复审范围');
+});
+
+test('集成：这一轮评审成功后 reviewScope 被清空，基线同时前移', async () => {
+  setup();
+  // 第 1 轮：package.json(x:1) + src/a.js 全审过 → 基线 = 这两个文件。
+  const agent1 = makeAgent({ events: [callEvent(1), resultEvent(1)] });
+  await handleTurnStopping(
+    { agent: agent1, turn: 1 },
+    {
+      collectDiff: async () => reviewDiff('D1', file('package.json', ['  "x": 1']), file('src/a.js', ['+one'])),
+      readJournal: journalUnknown,
+    },
+  );
+  assert.equal(statusOf('s1').last?.reviewed, true);
+
+  // 第 2 轮：只改 package.json → 算出一个待用的窄范围。
+  const agent2 = makeAgent({ events: [] });
+  await handleTurnStopping(
+    { agent: agent2, turn: 2 },
+    {
+      collectDiff: async () => reviewDiff('D2', file('package.json', ['  "x": 2']), file('src/a.js', ['+one'])),
+      readJournal: journalUnknown,
+    },
+  );
+  assert.deepEqual(
+    statusOf('s1').reviewScope,
+    { mode: 'narrow', files: ['package.json'], reason: 'changed' },
+    '前置：这一轮必须真的产出了窄范围',
+  );
+
+  // 第 3 轮：这一轮评审成功 → 窄范围被消费掉。
+  const agent3 = makeAgent({ events: [callEvent(3), resultEvent(3)] });
+  await handleTurnStopping(
+    { agent: agent3, turn: 3 },
+    {
+      collectDiff: async () => reviewDiff('D2', file('package.json', ['  "x": 2']), file('src/a.js', ['+one'])),
+      readJournal: journalUnknown,
+    },
+  );
+  const afterReview = statusOf('s1');
+  assert.equal(afterReview.last?.reviewed, true, '前置：第 3 轮必须被判为已评审');
+  assert.equal(afterReview.reviewScope, null, '评审完成后窄范围已消费，不能再被当成当前事实报告');
+
+  // 第 4 轮：只改 src/a.js。基线若仍停在 x:1，package.json 也会被算成变更 → 断言会红，
+  // 所以「只剩 src/a.js」间接证明了第 3 轮把基线更新成了 x:2。
+  const agent4 = makeAgent({ events: [] });
+  await handleTurnStopping(
+    { agent: agent4, turn: 4 },
+    {
+      collectDiff: async () => reviewDiff('D4', file('package.json', ['  "x": 2']), file('src/a.js', ['+one', '+two'])),
+      readJournal: journalUnknown,
+    },
+  );
+  assert.deepEqual(
+    statusOf('s1').reviewScope,
+    { mode: 'narrow', files: ['src/a.js'], reason: 'changed' },
+    '基线没前移到 x:2 的话，package.json 会一起被算进复审范围',
+  );
+});
+
+test('集成：确认无改动（空文件集）的回合 → 同样清掉上一轮留下的 reviewScope', async () => {
+  setup();
+  const agent1 = makeAgent({ events: [callEvent(1), resultEvent(1)] });
+  await handleTurnStopping(
+    { agent: agent1, turn: 1 },
+    {
+      collectDiff: async () => reviewDiff('D1', file('package.json', ['  "x": 1']), file('src/a.js', ['+one'])),
+      readJournal: journalUnknown,
+    },
+  );
+  assert.equal(statusOf('s1').last?.reviewed, true);
+
+  // 第 2 轮：只改 package.json → 产出待用的窄范围。
+  const agent2 = makeAgent({ events: [] });
+  await handleTurnStopping(
+    { agent: agent2, turn: 2 },
+    {
+      collectDiff: async () => reviewDiff('D2', file('package.json', ['  "x": 2']), file('src/a.js', ['+one'])),
+      readJournal: journalUnknown,
+    },
+  );
+  assert.deepEqual(statusOf('s1').reviewScope, { mode: 'narrow', files: ['package.json'], reason: 'changed' });
+
+  // 第 3 轮：取证成功但确认没有改动 → 这一轮不需要评审，窄范围同样已消费。
+  const agent3 = makeAgent({ events: [] });
+  await handleTurnStopping(
+    { agent: agent3, turn: 3 },
+    { collectDiff: async () => reviewDiff('D3'), readJournal: journalUnknown },
+  );
+
+  const status = statusOf('s1');
+  assert.equal(status.last?.skipped, 'no-diff-evidence', '前置：走的是「确认无改动」早退分支');
+  assert.equal(status.reviewScope, null, '本轮明确没有改动，却还报着上一轮的复审范围 = 读到陈旧字段');
+});
+
+test('集成：未命中触发规则的回合 → 同样清掉上一轮留下的 reviewScope', async () => {
+  setup();
+  const unchanged = file('src/a.js', ['+one']);
+
+  // 第 1 轮：评审成功 → 记下基线（package.json + src/a.js）。
+  const agent1 = makeAgent({ events: [callEvent(1), resultEvent(1)] });
+  await handleTurnStopping(
+    { agent: agent1, turn: 1 },
+    { collectDiff: async () => reviewDiff('D1', file('package.json', ['  "x": 1']), unchanged), readJournal: journalUnknown },
+  );
+  assert.equal(statusOf('s1').last?.reviewed, true, '前置：第 1 轮必须真的记为已评审（否则没有基线）');
+
+  // 第 2 轮：只改 package.json → 产出一个待用的窄范围。
+  const agent2 = makeAgent({ events: [] });
+  await handleTurnStopping(
+    { agent: agent2, turn: 2 },
+    { collectDiff: async () => reviewDiff('D2', file('package.json', ['  "x": 2']), unchanged), readJournal: journalUnknown },
+  );
+  assert.deepEqual(
+    statusOf('s1').reviewScope,
+    { mode: 'narrow', files: ['package.json'], reason: 'changed' },
+    '前置：第 2 轮必须真的产出了窄范围',
+  );
+
+  // 第 3 轮：只改了一个文档（docs/guide.md）。按现有触发规则，纯文档改动
+  // 一条规则都不命中（doc 不参与跨模块、不带 CONFIG/SECURITY/DELETION，
+  // 兜底 CODE 规则只对非 doc 文件生效）→ reasons=[]，门禁放行。
+  // 这一轮**没有**评审，所以上一轮的窄范围必须被消费掉：否则 agent 会按
+  // statusOf().reviewScope 去复审 package.json——而它已不在本轮 diff 里，
+  // 真正改了的 docs/guide.md 反而没人看。
+  const agent3 = makeAgent({ events: [] });
+  const released = await handleTurnStopping(
+    { agent: agent3, turn: 3 },
+    {
+      collectDiff: async () => reviewDiff('D3', file('docs/guide.md', ['补充说明文字'])),
+      readJournal: journalUnknown,
+    },
+  );
+
+  const status = statusOf('s1');
+  assert.equal(released, undefined, '门禁必须放行（没有推回）');
+  assert.deepEqual(status.last?.reasons, [], '前置：这一轮必须真的走到「未命中触发规则」，而不是别的分支');
+  assert.ok(!status.last?.needsAgentReview, '前置：没有命中触发规则就不该要求评审');
+  assert.equal(status.last?.reviewed, false, '前置：这一轮没有被评审');
+  assert.equal(status.last?.skipped, undefined, '前置：不是 no-diff / other-session-only 这些早退分支');
+  assert.equal(
+    status.reviewScope,
+    null,
+    '门禁已放行的一轮里仍报着上一轮的复审范围 = 把复审引到已不在 diff 里的文件',
+  );
+});
