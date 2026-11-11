@@ -181,3 +181,50 @@ test('单仓库会话：spanning=false，不制造噪音', async () => {
   assert.deepEqual(st.repos, ['/work/only']);
   assert.equal(st.spanning, false);
 });
+
+/**
+ * R3：同一棵树、同一份 diff，两个会话各自都要评审，不能互相顶账。
+ *
+ * 这条守的是「串评审」最隐蔽的形态：如果 reviewed 标记只按 diff 摘要记，
+ * 那么会话 A 审完，会话 B（同样改这棵树、但意图完全不同）就会被判成「已评审」而静默跳过。
+ * 宿主强制 agent.id === session.id，所以按会话 id 记账是可行的；这里把它钉住。
+ */
+test('同树两会话不互相顶账：各自都要发起一次评审', async () => {
+  setup();
+  const lines = [];
+  const deps = {
+    collectDiff: async () => configDiff('SAME-TREE'),   // 注意：摘要完全相同
+    readJournal: journalUnknown,
+    runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
+    repoRoots: async () => ['/work/repoA'],
+    gitRoot: async () => '/work/repoA',
+  };
+  // 会话 A 先发起评审，然后拿到一份**成功报告**——这一刻 A 才真的被记为「已评审」。
+  // 必须走到这一步，否则「已评审」分支根本没被触发，全局记账的错误实现也测不出来。
+  const reportEvents = [{ type: 'user/message', data: {
+    content: [{ type: 'text', text: 'Here is the completed code review report:\n\nok' }],
+    source: { kind: 'michengai-code-review' },
+  } }];
+  await handleTurnStopping({ agent: makeAgent({ id: 'sA' }), turn: 1 }, deps);
+  await handleTurnStopping({ agent: makeAgent({ id: 'sA', events: reportEvents }), turn: 1 }, deps);
+  const beforeB = lines.length;
+  // 会话 B：同一棵树、同一个 diff 摘要，但意图完全不同 → 必须再发起一次。
+  await handleTurnStopping({ agent: makeAgent({ id: 'sB' }), turn: 1 }, deps);
+  assert.equal(lines.length, beforeB + 1, 'B 不能被 A 的评审记录顶账（同树不同会话）');
+});
+
+test('同一会话同一摘要的重复回合不重复评审（单飞仍然成立）', async () => {
+  setup();
+  const lines = [];
+  const agent = makeAgent({ id: 'same' });
+  const deps = {
+    collectDiff: async () => configDiff('REPEAT'),
+    readJournal: journalUnknown,
+    runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
+    repoRoots: async () => ['/work/repoA'],
+    gitRoot: async () => '/work/repoA',
+  };
+  await handleTurnStopping({ agent, turn: 1 }, deps);
+  await handleTurnStopping({ agent, turn: 1 }, deps);
+  assert.equal(lines.length, 1, '同一会话同一摘要不该重复触发');
+});
