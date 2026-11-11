@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyTrigger, isCommentOnly, REASONS } from '../lib/trigger.js';
+import { classifyTrigger, isCommentOnly, isToggleOnlyChange, REASONS } from '../lib/trigger.js';
 
 const f = (path, added = [], removed = [], status = 'M') => ({ path, added, removed, status });
 
@@ -143,4 +143,74 @@ test('假绿③：files 不是数组 → 必须标 undetermined，不许当成�
   const empty = classifyTrigger({ available: true, files: [] });
   assert.equal(empty.trigger, false);
   assert.equal(empty.undetermined, false, '空清单是已确定的「没改动」，必须与「读不到」区分开');
+});
+
+// ---------------------------------------------- 翻转已有开关（2026-11-11 用户要求）
+
+/**
+ * 用户场景：**字段本来就有，这次只是把功能关掉**。
+ * 这类改动不评审；但它的边界比正例更重要——下面每条「仍必须评审」都是一次
+ * 真实可能误放行的形态，少一条就等于给静默漏审留口子。
+ */
+test('翻转已有开关字段 → 不评审（package.json / features.ts）', () => {
+  const cases = [
+    f('package.json', ['  "billingEnabled": false'], ['  "billingEnabled": true']),
+    f('features.ts', ['  billing: false,'], ['  billing: true,']),
+    f('flags.js', ['export const NEW_UI = false'], ['export const NEW_UI = true']),
+  ];
+  for (const file of cases) {
+    const r = classifyTrigger({ available: true, files: [file] });
+    assert.equal(r.trigger, false, `应免评审：${file.path}`);
+  }
+});
+
+test('新增开关字段（没有原值）→ 仍评审：那是新增能力，不是翻转', () => {
+  const r = classifyTrigger({ available: true, files: [f('features.ts', ['  billing: true,'], [])] });
+  assert.equal(r.trigger, true);
+});
+
+test('安全面路径下的开关 → 仍评审（关掉鉴权开关是最该被审的改动）', () => {
+  const r = classifyTrigger({ available: true, files: [f('src/auth/flags.ts', ['  guard: false,'], ['  guard: true,'])] });
+  assert.equal(r.trigger, true);
+  assert.ok(r.reasons.includes(REASONS.SECURITY), JSON.stringify(r.reasons));
+});
+
+test('非开关量（数值/字符串参数）→ 仍评审：那是调参，不是关功能', () => {
+  for (const [added, removed] of [
+    [['  timeout: 60,'], ['  timeout: 30,']],
+    [['  region: "us-east-1",'], ['  region: "cn-north-1",']],
+  ]) {
+    const r = classifyTrigger({ available: true, files: [f('package.json', added, removed)] });
+    assert.equal(r.trigger, true, `应评审：${added[0]}`);
+  }
+});
+
+test('key 不一致（删除 a 新增 b）→ 仍评审：形状上不是同一个开关', () => {
+  const r = classifyTrigger({ available: true, files: [f('features.ts', ['  b: false,'], ['  a: true,'])] });
+  assert.equal(r.trigger, true);
+});
+
+test('开关翻转 + 真实代码改动 → 仍评审（不能因为夹了一个开关就整体放行）', () => {
+  const r = classifyTrigger({
+    available: true,
+    files: [f('features.ts', ['  billing: false,'], ['  billing: true,']), f('src/a.ts', ['const x = compute()'], [])],
+  });
+  assert.equal(r.trigger, true);
+});
+
+/**
+ * 直接钉住 isToggleOnlyChange 自己的安全面守卫。
+ *
+ * 为什么不能只靠集成用例：classifyTrigger 里另有 SECURITY 理由兜着，所以即使
+ * isToggleOnlyChange 放行了 auth 路径，集成结果仍然是「要评审」——测试照样绿，
+ * 那条守卫就变成了没有证据支撑的注释。独立导出函数必须自己守住这条。
+ */
+test('isToggleOnlyChange 自身拒绝安全面路径（不依赖上层兜底）', () => {
+  for (const path of ['src/auth/flags.ts', 'config/token.json', 'lib/permission.ts']) {
+    assert.equal(
+      isToggleOnlyChange([{ path, added: ['  enabled: false'], removed: ['  enabled: true'], status: 'M' }]),
+      false,
+      `安全面不得判为开关翻转：${path}`,
+    );
+  }
 });
