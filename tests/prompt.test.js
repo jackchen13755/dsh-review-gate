@@ -83,6 +83,32 @@ test('提示词必须讲清两种评审入口（工具 + 命令）、不再推�
   assert.match(text, /未评审/, '拿不到证据时要如实说，不能装作审过');
 });
 
+// R16/R17/R18（2026-11-11）：三条工作流约定写进同一段系统提示——
+// 大需求先拆、拆完并行起子 agent、复审只看修复落点。
+// 钉在这里的原因：它们是行为约定，门禁不为它们记账；删掉不会有别的用例变红。
+test('提示词必须讲清大需求先拆、并行子 agent、复审只覆盖修复落点', () => {
+  applyConfig({ gate: true });
+  const { ctx, sections } = makeCtx();
+  apply(ctx, { gate: true });
+  const text = sections.find((s) => s.name === 'review-gate:review-first').text();
+
+  // R17：先试着拆成彼此独立的子任务，拆不动才自己顺序做
+  assert.match(text, /大需求/, '要讲清这是「大需求」的处理方式，不能只写成通用建议');
+  assert.match(text, /彼此独立的子任务/, '拆的目标是「彼此独立」的子任务');
+  assert.match(text, /拆不动[\s\S]{0,40}(顺序做|串行)/, '拆不动（强依赖/必须串行）才自己顺序做');
+
+  // R18：同一条消息里并行启动，且写作用域互不重叠
+  assert.match(text, /同一条消息里并行启动/, '必须要求同一条消息里并行启，否则模型会一个个排队等');
+  assert.match(text, /subagent/, '要点名具体工具，不能只说「并行」');
+  assert.match(text, /写作用域[\s\S]{0,30}互不重叠/, '不说明作用域，并行的子 agent 会互相覆盖文件');
+  assert.match(text, /互相覆盖/, '要写清重叠的后果，否则约束不成立');
+
+  // R16：复审窄化，范围由 review_gate_status 的 reviewScope 给出
+  assert.match(text, /复审[\s\S]{0,40}(文件\/行|修复)[\s\S]{0,20}/, '改完只需复审修复涉及的文件/行');
+  assert.match(text, /不要全量重审/, '必须明说不要全量重审');
+  assert.match(text, /reviewScope/, '窄范围来自 review_gate_status 的 reviewScope，要写出字段名');
+});
+
 test('门禁关闭时注入空文本（不打扰）', () => {
   applyConfig({ gate: false });
   const { ctx, sections } = makeCtx();
