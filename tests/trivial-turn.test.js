@@ -82,3 +82,77 @@ test('门禁层：提交推送回合即使 diff 命中配置类文件也放行�
   assert.equal(reviewed, false, '运维回合不应发起评审');
   assert.equal(statusOf('ops-turn').last.skipped, 'ops-only');
 });
+
+// ------------------------------------------------- 写意图与引号感知（2026-11-11）
+
+/**
+ * 这一组守的是**漏审**方向：真的改了工作树却判「免评审」。
+ *
+ * 为什么必须逐条列出来而不是抽查一个：早期实现把 echo/cat/ls/find/rg/sort
+ * 一律当只读，6 种写法全部漏审，且用户完全看不出「这轮没审」。
+ * 漏审比多审危险得多——多审只是浪费一次，漏审是静默放行。
+ */
+test('bash 带写意图 → 必须评审（重定向 / find 写操作 / xargs / sed -i / sort -o）', () => {
+  const dangerous = [
+    'echo hi > lib/a.js',
+    'ls > /tmp/out.txt',
+    'echo x >> lib/a.js',
+    'find . -name x -exec sed -i s/a/b/ {} ;',
+    'find . -delete',
+    'rg foo | xargs sed -i s/a/b/',
+    'sort -o out.txt in.txt',
+    'cat a.js | tee b.js',
+    'mv a.js b.js',
+    'git status > /tmp/log.txt',
+  ];
+  for (const command of dangerous) {
+    const r = classifyTurn([bash(command)], { turn: 1 });
+    assert.equal(r.trivial, false, `必须评审：${command}`);
+    assert.equal(r.reason, 'bash-write-intent', `原因要可区分：${command}`);
+  }
+});
+
+/**
+ * 这一组守的是**误审**方向：纯运维被判成要评审，白烧一次。
+ * 用「引号内有分隔符 / 有 > / git 全局选项」三种最容易踩的写法。
+ */
+test('引号感知与 git 全局选项：纯运维仍判 trivial（不因分隔符/重定向字符误判）', () => {
+  const safe = [
+    'git commit -m "fix: a; b"',
+    'git commit -m "note > file && done"',
+    'git -C /repo commit -m x',
+    'git -C /repo status',
+    'git add -A && git commit -m x && git push origin main',
+    'git log --oneline | head -5',
+  ];
+  for (const command of safe) {
+    const r = classifyTurn([bash(command)], { turn: 1 });
+    assert.equal(r.trivial, true, `应免评审：${command}（reason=${r.reason}）`);
+  }
+});
+
+test('运维回合里出现真实写文件工具仍然优先判 has-writes（不被 bash 分支掩盖）', () => {
+  const r = classifyTurn([bash('git status'), call('edit', 1, { file_path: '/a' })], { turn: 1 });
+  assert.equal(r.trivial, false);
+  assert.equal(r.reason, 'has-writes');
+});
+
+/**
+ * 用户明确要求「合并无冲突时不用调评审」。
+ *
+ * 实现思路不是去猜 diff 内容，而是靠结构：无冲突的 merge 只有 git 调用 → 免评审；
+ * 有冲突时必须 edit 冲突标记 → has-writes → 必评审。这两条一起钉住，缺一条就可能
+ * 出现「有冲突也没审」（漏审漏在冲突解决这种最该审的地方）。
+ */
+test('无冲突合并：只有 git merge 调用 → 免评审', () => {
+  for (const command of ['git merge feature', 'git merge --no-ff origin/main', 'git -C /repo merge topic']) {
+    const r = classifyTurn([bash(command)], { turn: 1 });
+    assert.equal(r.trivial, true, `应免评审：${command}（reason=${r.reason}）`);
+  }
+});
+
+test('有冲突合并：一旦出现 edit 解决冲突 → 必须评审', () => {
+  const r = classifyTurn([bash('git merge feature'), call('edit', 1, { file_path: 'a.ts' })], { turn: 1 });
+  assert.equal(r.trivial, false);
+  assert.equal(r.reason, 'has-writes');
+});
