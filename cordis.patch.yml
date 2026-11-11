@@ -13,20 +13,20 @@
       config:
         # 总开关。false = 完全不介入回合结束。
         gate: true
-        # 是否把回合推回去要求评审（默认 false）。
-        # 1.0.9+ 的 code-review 插件不再注册 dsh_code_review 工具，评审改为 /review 命令
-        # （用户触发，模型无法自己调），继续推回等于要求模型做一件它做不到的事。
-        # 改成只记录状态 + 在结论里提醒用户 /review。想恢复旧行为设 true。
+        # 是否把回合推回去要求评审（发布配置设 false）。
+        # steer=true  → 判定「需要评审」时把回合拉回一次，提示 agent 自己去调
+        #               dsh_code_review 工具（工具已恢复，模型可自行调用）。
+        # steer=false → 只写状态（needsAgentReview / reviewRoot / sessionCwd / hint）
+        #               并放行，不推回，由 agent 自己按提示决定何时评审。
         steer: false
-        # 自动评审（默认 true）：判定需要评审时，门禁用 ctx.commands.execute 替模型执行
-        # `/review 审查未提交的更改`——等价于用户敲命令、不经过模型。发起失败则退回
-        # 「只记录 + 提示」。设 false 就完全回到人工 /review。
+        # 已废弃（2026-11-11）：门禁不再执行任何命令——包括不再拿 ctx.commands.execute
+        # 替模型跑 /review。需要评审时只写状态，由 agent 调 dsh_code_review 工具发起。
+        # 保留该键仅为兼容既有配置：传入不产生任何效果。
         autoReview: true
-        # 自动评审传给 /review 的输入（自定义审查重点时改这里）。
-        # 给 /review 传 `--cwd <写入根>`（自研 fork 支持）。用第三方版本时设 false，
-        # 门禁会退化为「拒绝自动评审 + 提示去目标目录开会话」。
+        # 已废弃：同上（旧语义是给 /review 传 `--cwd <写入根>`）。键留着不删——删了会改变
+        # 别人既有配置的语义；门禁现在只把写入根写进 status.reviewRoot。
         autoReviewCwd: true
-        # 自动评审传给 /review 的输入（自定义审查重点时改这里）。
+        # 已废弃：同上（旧语义是传给 /review 的审查重点）。
         autoReviewInput: 审查未提交的更改
         # 每回合最多把 agent 拉回几次（评审较贵，默认只催 1 次）。
         gateMaxSteersPerTurn: 1

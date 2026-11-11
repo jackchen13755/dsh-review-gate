@@ -64,12 +64,13 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 
 **明确不拦**：纯 `.md` 且不含判定/API；纯注释与空白；锁文件、`dist/`、`node_modules/`、`CHANGELOG`；`ignoreGlobs` 命中。
 
-### 评审载体：`/review` 命令（1.0.9+ 起；工具形态已不存在）
+### 评审载体：`dsh_code_review` 工具（或用户敲 `/review`）
 
-`@michengai/dsh-code-review` **1.0.9+ 不再注册 `dsh_code_review` 工具**，改为斜杠命令 `/review`、`/review-cancel`、`/review-status`：
-命令是**用户**触发的，模型无法自己调用。审查完成后它把报告作为用户消息注入会话
+主判据是**工具调用**：`dsh_code_review` 已恢复为模型可调用的工具，由 agent 自己发起评审。
+它同时提供斜杠命令 `/review`、`/review-cancel`、`/review-status`，由**用户**触发。两条路都算证据：
+工具调用留在会话日志的 `tool/call` 里；命令审查完成后把报告作为用户消息注入会话
 （`source.kind = 'michengai-code-review'`，成功以 `Here is the completed code review report` 开头），
-这条消息由宿主写入会话日志，本插件把它与（旧版的）工具调用并列为评审证据。
+这条消息同样由宿主写入会话日志，本插件把两者并列为评审证据。
 本插件自带的 `review_brief` 取证工具已于 2026-11-10 **删除**——它只把准则与 diff 摆出来、审查由调用者自己完成，本质是自审。
 
 ### 报告识别（2026-11-10 修）：一处字段读错导致反复评审
@@ -82,20 +83,28 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 同一版 diff 被重复评审时（后面几次超时/中止），最后一条可能是失败报告，但 diff 没变，
 仍然算覆盖——否则会越失败越重试。
 
-### 自动评审（`autoReview: true`，默认开）
+### 需要评审时只写状态，不执行任何命令（2026-11-11 起）
 
-模型自己调不了 `/review`，但**插件可以**：宿主提供
-`ctx.commands.execute(agent, line, attachments, signal)`——文档原文「解析并执行已知命令，**不经过模型**」。
-门禁在判定「需要评审」时直接执行 `/review 审查未提交的更改`，效果等于你亲手敲命令，但不需要人工介入：
+门禁**不执行任何命令**，也不替模型发起评审。判定「需要评审」时它只往 `review_gate_status`
+里写状态，交给外部去发起：
 
-| 情况 | 行为 |
+| 字段 | 含义 |
 |---|---|
-| 判定需要评审 | 自动执行 `/review …`，状态记 `autoReview.started = true`，**不推回** |
-| 命令未解析（插件没装） | 退回「只记录」，`failure = command-not-resolved`，绝不假装已评审 |
-| 命令抛错 | 同上，保留 `failure` 原文 |
-| `autoReview: false` | 回到人工 `/review` |
+| `needsAgentReview: true` | 本回合需要评审（状态标记，不是动作） |
+| `reviewRoot` | 按**写入路径**解析出的评审根（见上一节的工作树问题） |
+| `sessionCwd` | 会话的**实时**目录（不是 `header.cwd`） |
+| `hint` | 一句话说明该做什么：由主会话调 `dsh_code_review` 工具，或你手动跑 `/review` |
 
-默认**不再把回合推回**（`steer: false`）：推回只能要求模型做一件它做不到的事。
+评审的发起方只有两个：**agent 自己**调 `dsh_code_review` 工具；或**用户**亲手敲 `/review`。
+
+废弃的键：`autoReview` / `autoReviewCwd` / `autoReviewInput` / `autoReviewTimeoutMs` 四个键**已废弃**——
+保留只为兼容既有配置，传入不产生任何效果（执行路径已不存在）。
+早先那条「门禁拿 `ctx.commands.execute` 代跑 `/review`」的路子已删除：它与 agent 自己调工具
+会互相叠加（门禁代跑 → 报告回投 → 模型照提示再调一次 → 门禁又判需评审），实测出现无限评审，
+由 `tests/no-command-trigger.test.js` 反向断言钉住（`runCommand` 必须 0 次调用）。
+
+推回是独立开关：发布配置 `steer: false`（只记录状态、不推回）；设 `steer: true` 则门禁仍会把
+回合拉回一次、要求 agent 去评审。
 
 旧版遗留的硬约束（`lib/review-tool-policy.js`，当前休眠）：**`dsh_code_review` 只允许在主会话调用**，任何子 Agent 里调用都会被 `ctx.tools.guard()` 直接拒绝（理由串 `recursion-cut: ...`，可用 `DSH_*` 日志 grep 取证）。
 原因：该工具会 spawn 独立审查子 Agent，而审查子继承全局 `AGENTS.md` 的「开工先叫人」，可能反过来召唤 Agency 专家；专家又被要求「交付前跑一次评审」→ 再起审查子 → 成环（实测跑到 `delegationDepth=4`）。把工具限制在主会话，环的闭合边就不存在。
