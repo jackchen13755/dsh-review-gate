@@ -139,3 +139,45 @@ test('已评审（有覆盖当前 diff 的报告消息）→ 不触发自动评�
   );
   assert.equal(called, false, '已有覆盖当前 diff 的评审就不该再发起');
 });
+
+// 2026-11-11 多仓库：工作区根常是多个独立仓库的父目录（本机实测 21 个），
+// 一个会话可以同时改两个仓库。行为契约是「审主范围 + 明确报出其余未覆盖」，
+// 而不是静默只审一个、让用户以为全覆盖了。
+test('跨仓库会话：statusOf 报出全部仓库根，主范围取最近写入的那个', async () => {
+  setup();
+  const agent = makeAgent();
+  const lines = [];
+  const roots = ['/work/repoA', '/work/repoB'];
+  await handleTurnStopping(
+    { agent, turn: 1 },
+    {
+      collectDiff: async root => configDiff(`R-${root}`),
+      readJournal: journalUnknown,
+      runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
+      repoRoots: async () => roots,
+      gitRoot: async () => '/work',
+    },
+  );
+  const st = statusOf('s1');
+  assert.deepEqual(st.repos, roots, '两个仓库都必须被报出来');
+  assert.equal(st.spanning, true, '跨仓库必须显式标记，否则会被误读成全部审过');
+  assert.ok(lines.some(l => l.includes('/work/repoA')), '主范围必须是 repos[0]（最近在改的那个）');
+});
+
+test('单仓库会话：spanning=false，不制造噪音', async () => {
+  setup();
+  const agent = makeAgent();
+  await handleTurnStopping(
+    { agent, turn: 1 },
+    {
+      collectDiff: async () => configDiff('S1'),
+      readJournal: journalUnknown,
+      runCommand: async () => ({ kind: 'success' }),
+      repoRoots: async () => ['/work/only'],
+      gitRoot: async () => '/work',
+    },
+  );
+  const st = statusOf('s1');
+  assert.deepEqual(st.repos, ['/work/only']);
+  assert.equal(st.spanning, false);
+});

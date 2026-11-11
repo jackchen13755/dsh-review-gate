@@ -5,9 +5,12 @@ import { applyConfig } from '../lib/config.js';
 import { handleTurnStopping, clearGateState } from '../lib/gate.js';
 import {
   clearObserved,
+  latestObservedPath,
   observedPaths,
   observedSnapshot,
   recordWrite,
+  repoRootFromObserved,
+  repoRootsFromObserved,
   resolveSessionId,
 } from '../lib/observed.js';
 
@@ -227,4 +230,56 @@ test('降级模式：新增非代码文件（.md）→ 不命中 structural', as
   });
   const cls = classifyTrigger(snap);
   assert.equal(cls.reasons.includes('structural'), false, '文档新增不该要求 lens');
+});
+
+// ------------------------------------------------- 最近写入语义与多仓库（2026-11-11）
+
+/**
+ * 这三条守的是同一个故障：「多仓库工作区里，门禁审的不是你正在改的那个项目」。
+ *
+ * 关键前提（容易写错）：`Map#set` 对**已存在的键不会移动位置**，所以不主动维护顺序，
+ * 键序就退化成「首次写入顺序」。而 repoRootsFromObserved 正是靠这个顺序判断
+ * 「此刻在改哪个仓库」。用「写 A → 写 B → 再写 A」这种输入才能暴露它，
+ * 只写一次 A、一次 B 是测不出来的（那两种输入下两种实现结果相同）。
+ */
+test('recordWrite 刷新最近写入顺序：重复写同一文件会移到末尾', () => {
+  clearObserved();
+  recordWrite('lru', '/r/a.js');
+  recordWrite('lru', '/r/b.js');
+  recordWrite('lru', '/r/a.js');
+  assert.deepEqual(observedPaths('lru'), ['/r/b.js', '/r/a.js'], '再次写 a.js 必须把它刷到末尾');
+  assert.equal(latestObservedPath('lru'), '/r/a.js');
+  clearObserved();
+});
+
+test('recordWrite 保留历史的 created 标记（重复写入不丢「新增」事实）', async () => {
+  clearObserved();
+  recordWrite('keep', '/r/new.js', { created: true });
+  recordWrite('keep', '/r/new.js', { created: false });
+  const snap = await observedSnapshot('keep', { readFile: async () => 'x' });
+  const file = snap.files.find(f => f.absPath === '/r/new.js');
+  assert.equal(file.status, 'A', '第一次判为新增后，再改它仍然是新增');
+  clearObserved();
+});
+
+test('repoRootsFromObserved：返回全部仓库根，最近写入的排最前，不丢另一个仓库', async () => {
+  clearObserved();
+  recordWrite('multi', '/work/repoA/src/a.js');
+  recordWrite('multi', '/work/repoB/src/b.js');
+  recordWrite('multi', '/work/repoA/src/c.js');
+  const exists = async p => p === '/work/repoA/.git' || p === '/work/repoB/.git';
+  const roots = await repoRootsFromObserved('multi', { exists });
+  // 两个都要在（只返回一个 = 静默漏审另一个），且最近改的 A 排第一。
+  assert.deepEqual(roots, ['/work/repoA', '/work/repoB']);
+  clearObserved();
+});
+
+test('repoRootFromObserved 取最近写入的仓库，而不是最先写入的', async () => {
+  clearObserved();
+  const exists = async p => p === '/work/repoA/.git' || p === '/work/repoB/.git';
+  recordWrite('mru', '/work/repoB/src/b.js');
+  recordWrite('mru', '/work/repoA/src/a.js');
+  // 先写 B 后写 A：旧实现（按插入序取第一个）会返回 repoB —— 审错树。
+  assert.equal(await repoRootFromObserved('mru', { exists }), '/work/repoA');
+  clearObserved();
 });
