@@ -2,10 +2,15 @@
  * 会话目录解析 + 门禁取证的隔离性。
  *
  * 两个真实故障（2026-11-10 用户报障）：
- *  1. 在 worktree 里改的，评审却看到主区域 —— 第三方 /review 按 `parent.session.header.cwd`
- *     取 diff，而 header.cwd 是**会话创建时**的值，cd 之后不会更新。
+ *  1. 在 worktree 里改的，评审却看到主区域 —— 会话 header.cwd 是**创建时**的值，
+ *     cd 之后不会更新，按它取 diff 会审错树。
  *  2. 多会话并行时评审互相污染 —— 门禁旧实现在无 cwd 时回退 `process.cwd()`（宿主进程
  *     目录，所有会话共用一份）。
+ *
+ * 2026-11-11 契约变更后，门禁不再代跑 /review（见 tests/no-command-trigger.test.js）。
+ * 但「评审必须指向正确的树」这条本意不变，只是载体从「命令行里的 --cwd」变成
+ * `statusOf(sid).last.reviewRoot`：门禁负责算准并在状态里写明该审哪棵树，
+ * 再由此刻唯一被允许发起评审的一方（agent 调 dsh_code_review，或用户敲 /review）照着做。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -110,23 +115,30 @@ test('拿不到任何目录 → 直接放行且不取证（不再用进程 cwd�
   assert.equal(statusOf(agent.id).last.skipped, 'no-cwd');
 });
 
-test('目录已切走（stale）→ 不发自动评审，并说明第三方会按创建时目录取 diff', async () => {
+test('目录已切走（stale）→ 不替模型发起评审，改为让 agent 自己按实时目录调工具', async () => {
   setup();
   const agent = makeAgent({ cwd: '/w/main' });
-  let reviewed = false;
+  // 不代跑 /review 之后，「不替模型发起」由 runCommand 零调用来钉；
+  // 该审哪棵树仍必须由门禁算准（reviewRoot 用实时目录，不是 header.cwd）。
+  const lines = [];
   await handleTurnStopping(
     { agent, turn: 1 },
     {
       liveCwd: () => '/w/wt/feat',
       collectDiff: async () => configDiff(),
       readJournal: journalUnknown,
-      runCommand: async () => { reviewed = true; return { kind: 'success' }; },
+      runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
     },
   );
-  assert.equal(reviewed, false, '审错树比不审更糟');
+  assert.deepEqual(lines, [], '审错树比不审更糟：门禁不得替它发起评审');
   const st = statusOf(agent.id).last;
-  assert.equal(st.autoReview?.failure, 'cwd-changed-since-session-created');
-  assert.match(String(st.hint), /\/review/);
+  assert.equal(st.needsAgentReview, true, '仍必须把「该评审了」写进状态');
+  assert.equal(st.reviewRoot, '/w/wt/feat', '必须指向实时目录，不能用 header.cwd=/w/main');
+  assert.equal(st.sessionCwd, '/w/wt/feat');
+  assert.match(String(st.hint), /dsh_code_review/, '提示要指向 agent 自己能调的工具');
+  // 旧说法「第三方会按创建时目录取 diff」已过时：现在发起方是 agent 自己，
+  // 它按 reviewRoot 指定目录即可，不能再把责任推给第三方的 header 取值。
+  assert.doesNotMatch(String(st.hint), /第三方/, 'hint 不得再声称第三方会按 header 取 diff');
 });
 
 test('两个会话各用各的目录，互不串味', async () => {
@@ -207,7 +219,7 @@ test('真实场景回归：改动在工作树子目录时，取证用写入根�
   assert.deepEqual(seen, ['/w/repo/.worktrees/feat'], '必须按写入根取证');
 });
 
-test('改动在互不相干的目录 → 用 --cwd 指向写入根发起评审', async () => {
+test('改动在互不相干的目录 → status 里的 reviewRoot 指向写入根（不代跑评审）', async () => {
   setup();
   const agent = makeAgent({ cwd: '/w/repo' });
   const lines = [];
@@ -222,14 +234,19 @@ test('改动在互不相干的目录 → 用 --cwd 指向写入根发起评审',
       runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
     },
   );
-  assert.equal(lines.length, 1);
-  assert.match(lines[0], /--cwd "\/w\/repo-wt\/feat"/, '必须把写入根作为 --cwd 传下去');
+  const st = statusOf(agent.id).last;
+  assert.equal(st.reviewRoot, '/w/repo-wt/feat', '评审范围必须跟写入根走，不是会话目录');
+  assert.equal(st.needsAgentReview, true, '必须把「该评审了」写进状态');
+  assert.deepEqual(lines, [], '门禁不得代跑 /review');
 });
 
-test('不支持 --cwd 时（autoReviewCwd=false）→ 拒绝并给出目标路径', async () => {
+test('不支持 --cwd 时（autoReviewCwd=false）→ 不代跑，改为把目标写入根写进 last', async () => {
   setup({ autoReviewCwd: false });
   const agent = makeAgent({ cwd: '/w/repo' });
-  let reviewed = false;
+  // 旧契约：不支持 --cwd 就「拒绝自动评审 + 提示去目标目录开会话」。
+  // 新契约下门禁本来就不代跑命令，但它仍必须把目标路径算准并留下——
+  // agent 据此给 dsh_code_review 指定正确的树，否则又会审错地方。
+  const lines = [];
   await handleTurnStopping(
     { agent, turn: 1 },
     {
@@ -238,16 +255,17 @@ test('不支持 --cwd 时（autoReviewCwd=false）→ 拒绝并给出目标路�
       repoRoot: async () => '/w/repo-wt/feat',
       collectDiff: async () => configDiff(),
       readJournal: journalUnknown,
-      runCommand: async () => { reviewed = true; return { kind: 'success' }; },
+      runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
     },
   );
-  assert.equal(reviewed, false);
+  assert.deepEqual(lines, [], '门禁不得代跑 /review');
   const st = statusOf(agent.id).last;
-  assert.equal(st.autoReview?.failure, 'writes-outside-session-cwd');
-  assert.match(String(st.hint), /\/w\/repo-wt\/feat/);
+  assert.equal(st.reviewRoot, '/w/repo-wt/feat', '目标树必须留在状态里，供发起方指定');
+  assert.equal(st.needsAgentReview, true, '必须把「该评审了」写进状态');
+  assert.equal(st.steered, false, '不得推回');
 });
 
-test('真实场景回归：改动在主仓库的嵌套工作树里 → 用 --cwd 审那棵工作树', async () => {
+test('真实场景回归：改动在主仓库的嵌套工作树里 → reviewRoot 指向那棵工作树', async () => {
   setup();
   const agent = makeAgent({ cwd: '/w/repo' });
   const lines = [];
@@ -262,6 +280,8 @@ test('真实场景回归：改动在主仓库的嵌套工作树里 → 用 --cwd
       runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
     },
   );
-  assert.equal(lines.length, 1);
-  assert.match(lines[0], /--cwd "[^"]*\.worktrees\/feat"/, '必须审写入根，而不是主仓库');
+  const st = statusOf(agent.id).last;
+  assert.equal(st.reviewRoot, '/w/repo/.worktrees/feat', '必须审写入根，而不是主仓库');
+  assert.equal(st.needsAgentReview, true);
+  assert.deepEqual(lines, [], '门禁不得代跑 /review');
 });

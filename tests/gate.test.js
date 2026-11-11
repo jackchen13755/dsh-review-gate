@@ -45,8 +45,8 @@ const commentDiff = (digest = 'C1') => ({
 });
 
 function setup(overrides = {}) {
-  // 默认 steer=false（1.0.9+ 让模型无法自己触发评审）；既有用例断言的是推回行为，
-  // 所以这里显式打开 steer，另有一条用例专门钉默认值。
+  // 默认 steer=true：既有用例断言的是推回行为（离散型开关，不是契约默认值）。
+  // 运行配置里 steer=false（发布配置显式关闭），另有一条用例专门钉「默认不推回」。
   overrides = { steer: true, ...overrides };
   clearGateState();
   applyConfig({ gate: true, gateMaxSteersPerTurn: 1, gateMaxSteersPerSession: 3, ...overrides });
@@ -185,18 +185,27 @@ test('门禁总开关关掉 → 完全不介入', async () => {
   assert.equal(text, undefined);
 });
 
-test('默认不推回：命中触发规则也只记状态（1.0.9+ 模型无法自己触发 /review）', async () => {
+test('默认不推回：命中触发规则也只记状态（评审工具已恢复，由 agent 自己发起）', async () => {
   setup({ steer: false });
   const agent = makeAgent({ events: [] });
+  // 不代跑 /review 之后，「不推回」的载体从 runCommand 换成了状态字段：
+  // 门禁只写 needsAgentReview + reviewRoot，发起方是 agent 自己。
+  const lines = [];
   const text = await handleTurnStopping(
     { agent, turn: 1 },
-    { collectDiff: async () => configDiff('NS1'), readJournal: journalUnknown },
+    {
+      collectDiff: async () => configDiff('NS1'),
+      readJournal: journalUnknown,
+      runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
+    },
   );
   assert.equal(text, undefined, '不该返回推回文本');
   assert.equal(agent.steered.length, 0, '不该调用 agent.steer');
   const st = statusOf(agent.id).last;
-  assert.equal(st.needsManualReview, true, '状态里必须标出「需要人工 /review」');
-  assert.match(String(st.hint), /\/review/);
+  assert.equal(st.needsAgentReview, true, '状态里必须标出「该由 agent 自己评审」');
+  assert.match(String(st.hint), /dsh_code_review/, '提示要指向模型可调用的工具');
+  assert.equal(st.reviewRoot, '/tmp/work', '必须记录「评审该指向哪棵树」= 会话目录');
+  assert.deepEqual(lines, [], '门禁不得再代跑 /review');
 });
 
 test('子 agent 一律不拦：评审工具被禁在子 Agent 之外，它没有可用载体', async () => {
