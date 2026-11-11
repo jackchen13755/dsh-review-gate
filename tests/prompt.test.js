@@ -59,16 +59,21 @@ test('注入一个 review-first 分节，且位置在工具指引之前', () => 
   assert.equal(typeof sec.text, 'function', 'text 应为函数，便于按配置动态返回');
 });
 
-test('提示词必须讲清「评审改由 /review 命令触发、不会再推回」，并给出按改动类型的做法', () => {
+// 契约在 2026-11-11 反转：评审工具 `dsh_code_review` 重新注册（用户要求 agent 可触发），
+// 于是「模型无法自己调用」这句不再成立。本用例改为钉住**新**契约：
+// 两条路径都要写清（工具 + 命令），且必须明说子 Agent 不要调用（否则递归环复活）。
+test('提示词必须讲清两种评审入口（工具 + 命令）、不再推回、子 Agent 禁止调用', () => {
   applyConfig({ gate: true });
   const { ctx, sections } = makeCtx();
   apply(ctx, { gate: true });
   const text = sections.find((s) => s.name === 'review-gate:review-first').text();
 
-  assert.match(text, /\/review/, '必须写明评审由 /review 命令触发');
+  assert.match(text, /dsh_code_review/, '必须写明主会话可直接调用评审工具（否则模型不知道能用它）');
+  assert.match(text, /\/review/, '命令路径仍要写明（异步投递、可 --cwd）');
   assert.match(text, /不会再把回合推回|不会.*推回/, '必须说明不再推回，否则模型会做无用的自救');
-  assert.doesNotMatch(text, /dsh_code_review/, '1.0.9+ 已无该工具，提示词不能再提');
-  assert.match(text, /提醒用户/, '要告诉模型：收尾时提醒用户跑 /review');
+  assert.doesNotMatch(text, /模型无法自己调用|不再提供工具/, '工具已恢复，这句会让模型放弃调用');
+  assert.match(text, /子 Agent[\s\S]{0,40}(不要调用|拿不到|一律)/, '必须讲清子 Agent 不得调用（递归保护）');
+  assert.match(text, /不要只提醒用户/, '收尾时该自己取证，不能把取证推给用户');
   assert.doesNotMatch(text, /review_brief/, '自有取证工具已删，不能再出现在提示词里');
   assert.match(text, /lens/, '结构性改动要提 lens');
   assert.match(text, /impact.*circular.*metrics/, 'lens 要具体到三个动作');
