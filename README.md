@@ -106,20 +106,19 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 推回是独立开关：发布配置 `steer: false`（只记录状态、不推回）；设 `steer: true` 则门禁仍会把
 回合拉回一次、要求 agent 去评审。
 
-旧版遗留的硬约束（`lib/review-tool-policy.js`，当前休眠）：**`dsh_code_review` 只允许在主会话调用**，任何子 Agent 里调用都会被 `ctx.tools.guard()` 直接拒绝（理由串 `recursion-cut: ...`，可用 `DSH_*` 日志 grep 取证）。
+`dsh_code_review` 只允许在**主会话**调用（`lib/review-tool-policy.js`）：任何子 Agent 里调用都会被 `ctx.tools.guard()` 或 `pre-execute` 直接拒绝（理由串 `recursion-cut: ...`，可用 `DSH_*` 日志 grep 取证）。
 原因：该工具会 spawn 独立审查子 Agent，而审查子继承全局 `AGENTS.md` 的「开工先叫人」，可能反过来召唤 Agency 专家；专家又被要求「交付前跑一次评审」→ 再起审查子 → 成环（实测跑到 `delegationDepth=4`）。把工具限制在主会话，环的闭合边就不存在。
+这条守卫在 2026-11-11 随自研 fork 重新注册该工具而**重新生效**（此前上游 1.0.9+ 把工具改成斜杠命令，守卫一度没有任何命中点）。
 
-所以判定时按「本会话有没有前者可用」分流。可用性的判据是**本会话里成功跑通过** `dsh_code_review`（有 `tool/call` 且有成功结果）：
-
-- 用「成功过」而不是「出现过」：一次失败的调用同样会留下 `tool/call`，若据此判 weak-tool，就会把 agent 推回去用一个刚刚失败的工具——越推越死。
-- 宁可漏判也不误伤：没调用过、每次都失败、或宿主不落结果，都归为「不可用」，此时 `review_brief` 是唯一退路。
+判定只有一条路：**本回合真的调过 `dsh_code_review`**——`tool/call` 加上成功结果，或一条覆盖当前 diff 的 `/review` 报告，才算已评审。
 
 | 情形 | 判定 | 为什么 |
 |---|---|---|
-| 真调了 `dsh_code_review` | 通过（`ok`） | 主干路径 |
+| 真调了 `dsh_code_review` | 通过（`ok`） | 主干路径，也是唯一路径 |
 | 没调用 `dsh_code_review` | 拦 | 唯一被接受的评审证据 |
 
-`brief-self-review` 是**如实标注**而不是等价通过：它不会记成 `ok`，在 `review_gate_status` 里能看出这次是自审。
+评审工具只剩 `dsh_code_review` 一个候选（`lib/gate.js` 的 `REVIEW_TOOLS` 里只有它），所以 `lib/verdict.js` 里**不存在**「自审顶替独立评审」的分支，也没有「工具不可用时改走自审」的退路。
+旧版的两件东西都已删除，别再照旧说明写：`review_brief` 取证工具（2026-11-10 删）与 `brief-self-review` 判决原因（已不在 `REASON_TEXT` 的八个原因里）。
 
 ### 「确认没改」与「取证坏了」必须能区分
 
