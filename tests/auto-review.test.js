@@ -228,3 +228,71 @@ test('同一会话同一摘要的重复回合不重复评审（单飞仍然成�
   await handleTurnStopping({ agent, turn: 1 }, deps);
   assert.equal(lines.length, 1, '同一会话同一摘要不该重复触发');
 });
+
+// ------------------------------------------ 只评审本会话自己的改动（2026-11-11）
+
+/**
+ * 同一分支被多个会话同时改时，`git diff` 看到的是整棵树。
+ * 归属只能按「本会话写过哪些文件」判断，所以这里覆盖两种结论：
+ * 有交集 → 只审自己的那几个；完全无交集 → 明确跳过（不是「没改动」）。
+ */
+const seedWrites = async (...paths) => {
+  const { recordWrite, clearObserved } = await import('../lib/observed.js');
+  clearObserved();
+  for (const p of paths) recordWrite('mine', p);
+};
+
+const twoRepoDeps = (lines, files) => ({
+  collectDiff: async () => ({
+    available: true, digest: 'TREE-DIGEST',
+    files: files.map(path => ({ path, status: 'M', added: ['+'], removed: ['-'] })),
+    totals: { added: files.length, removed: files.length },
+  }),
+  readJournal: journalUnknown,
+  runCommand: async (line) => { lines.push(line); return { kind: 'success' }; },
+  repoRoots: async () => ['/work/repoA'],
+  gitRoot: async () => '/work/repoA',
+});
+
+test('只评审本会话自己的改动：别的会话改的文件不进评审范围', async () => {
+  setup();
+  await seedWrites('/work/repoA/src/mine.ts');
+  const lines = [];
+  await handleTurnStopping(
+    { agent: makeAgent({ id: 'mine' }), turn: 1 },
+    twoRepoDeps(lines, ['src/mine.ts', 'src/other-session.ts']),
+  );
+  assert.equal(lines.length, 1, '应当发起评审');
+  assert.ok(lines[0].includes('src/mine.ts'), '自己的改动必须在范围里');
+  assert.ok(!lines[0].includes('src/other-session.ts'), '别的会话的改动不得写进评审范围');
+  // 排除列表放在 statusOf 顶层（与 repos 并列）：last 会被十几个分支各自覆盖写，
+  // 塞进 last 就会时有时无。
+  assert.deepEqual(statusOf('mine').excludedFiles, ['src/other-session.ts']);
+});
+
+test('改动全部属于别的会话 → 明确跳过，且不能记成「确认无改动」', async () => {
+  setup();
+  await seedWrites('/work/repoA/src/mine.ts');
+  const lines = [];
+  await handleTurnStopping(
+    { agent: makeAgent({ id: 'mine' }), turn: 1 },
+    twoRepoDeps(lines, ['src/other-session.ts']),
+  );
+  assert.equal(lines.length, 0, '没有自己的改动就不该发起评审');
+  const last = statusOf('mine').last;
+  assert.equal(last.skipped, 'other-session-only');
+  assert.equal(last.noChange, false, '「别人的改动」必须与「确认无改动」区分开');
+});
+
+test('没有写入记录时不收敛：仍按整棵树评（不能凭空虚收成空集导致漏审）', async () => {
+  setup();
+  const { clearObserved } = await import('../lib/observed.js');
+  clearObserved();
+  const lines = [];
+  await handleTurnStopping(
+    { agent: makeAgent({ id: 'norec' }), turn: 1 },
+    twoRepoDeps(lines, ['src/a.ts', 'src/b.ts']),
+  );
+  assert.equal(lines.length, 1, '无法归属时必须保持原行为');
+  assert.ok(!lines[0].includes('评审范围'), '不收敛时不该硬塞范围说明');
+});
