@@ -8,7 +8,7 @@ DSH（DeepSeek Harness）插件。当一轮改动命中「判定类 / 配置类�
 
 ## 为什么要它
 
-装了 `dsh_code_review` 不等于会用。实测同一台机器上：主会话 + 11 个子 agent，该工具**在工具 schema 里、被调用 0 次**；连「代码审查工程师」专家自己也没调（2026-11-12 起该专家改为在插件内直连 code-review 引擎，不再经由本工具，所以这条观测从「行为失败」变成了「结构如此」——见下方「专家链路的例外」）。而在系统提示里写着 `PRIMARY TOOL … MUST` 的另一个工具，同样是 0 次。
+提示词里写着「必须评审」不等于会发生评审。实测同一台机器上：主会话 + 11 个子 agent，当时的评审工具**在工具 schema 里、被调用 0 次**；系统提示里写着 `PRIMARY TOOL … MUST` 的另一个工具，同样是 0 次。
 
 **提示词层的措辞不产生行为。** 唯一不依赖模型自觉的层是机械门禁 —— 这就是本插件。
 
@@ -18,7 +18,7 @@ DSH（DeepSeek Harness）插件。当一轮改动命中「判定类 / 配置类�
 
 | # | 条件 | 依据 | 防哪种谎 |
 |---|---|---|---|
-| 1 | 本回合调用过 `dsh_code_review` | 会话日志的 `tool/call`（宿主写的事实） | 嘴上说评审过 / 手写 journal 伪造 |
+| 1 | 本回合**主会话**调用过 `summon_expert` / `summon_experts` 且点名「代码审查工程师」 | 会话日志的 `tool/call`（宿主写的事实，不可伪造） | 嘴上说评审过 / 手写报告伪造 |
 | 2 | 该次调用没有失败 | `tool/result` 的错误信号 | 调了但评审挂了 |
 | 3 | 第三方 journal 若存在则不能是 reject | `$DSH_HOME/code-review/<sha256(agent.id)>.json` | `finished` 但 `result.status:'failed'` |
 | 4 | 评审之后没有再改代码 | 自算的 `git diff` 摘要比对 | 评审完又偷改一行 |
@@ -56,7 +56,7 @@ DSH（DeepSeek Harness）插件。当一轮改动命中「判定类 / 配置类�
 
 ### 结构性改动为什么额外要求 `lens`
 
-新增/删除代码文件等于动了模块边界，而「模块划分是否合理」**从单个文件里看不出来**，只能从依赖图上看。所以这一类除了 `dsh_code_review`，还要求本回合跑过 `lens`（`impact` / `circular` / `metrics`），否则判定为未评审（`no-lens`）。
+新增/删除代码文件等于动了模块边界，而「模块划分是否合理」**从单个文件里看不出来**，只能从依赖图上看。所以这一类除了专家评审，还要求本回合跑过 `lens`（`impact` / `circular` / `metrics`），否则判定为未评审（`no-lens`）。
 
 依据是实测：`lens` 的工具描述里写着 PRIMARY TOOL、系统提示里也有 MUST 段落，但主会话 + 11 个子 agent 调用数为 **0**。写「应该用」不产生行为，把它变成流程里绕不过去的一步才行。
 
@@ -64,71 +64,59 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 
 **明确不拦**：纯 `.md` 且不含判定/API；纯注释与空白；锁文件、`dist/`、`node_modules/`、`CHANGELOG`；`ignoreGlobs` 命中。
 
-### 评审载体：`dsh_code_review` 工具（或用户敲 `/review`）
+### 评审载体：主会话召唤「代码审查工程师」专家
 
-主判据是**工具调用**：`dsh_code_review` 已恢复为模型可调用的工具，由 agent 自己发起评审。
-它同时提供斜杠命令 `/review`、`/review-cancel`、`/review-status`，由**用户**触发。两条路都算证据：
-工具调用留在会话日志的 `tool/call` 里；命令审查完成后把报告作为用户消息注入会话
-（`source.kind = 'michengai-code-review'`，成功以 `Here is the completed code review report` 开头），
-这条消息同样由宿主写入会话日志，本插件把两者并列为评审证据。
-本插件自带的 `review_brief` 取证工具已于 2026-11-10 **删除**——它只把准则与 diff 摆出来、审查由调用者自己完成，本质是自审。
+2026-11-16 起评审入口只剩一条：**主会话**调用 `summon_expert("代码审查工程师", 任务书)`
+（或 `summon_experts` 批量里含该专家）。第三方 `@michengai/dsh-code-review` 已从 desktop profile
+卸载，`dsh_code_review` 工具与 `/review` 命令**都不存在了**——旧 README 教的那两条路已经走不通。
 
-### 报告识别（2026-11-10 修）：一处字段读错导致反复评审
+证据形态（`lib/review-expert.js`，纯函数、有边界输入单测）：
 
-实测会话 `session-500b6b50`（6 回合、无新增改动）里门禁连发 **5 次** `/review`。原因：
-真实报告注入的事件形状是 `{ type:'user/message', data:{ content:[…], source:{kind:'michengai-code-review'} } }`，
-而旧实现只认 `data.message.content`，于是「评审已完成」永远识别不到 → 每回合又触发一次。
-
-同时把判据从「只看最后一条报告」改成「**最后一次写文件之后是否出现过成功报告**」：
-同一版 diff 被重复评审时（后面几次超时/中止），最后一条可能是失败报告，但 diff 没变，
-仍然算覆盖——否则会越失败越重试。
-
-### 需要评审时只写状态，不执行任何命令（2026-11-11 起）
-
-门禁**不执行任何命令**，也不替模型发起评审。判定「需要评审」时它只往 `review_gate_status`
-里写状态，交给外部去发起：
-
-| 字段 | 含义 |
-|---|---|
-| `needsAgentReview: true` | 本回合需要评审（状态标记，不是动作） |
-| `reviewRoot` | 按**写入路径**解析出的评审根（见上一节的工作树问题） |
-| `sessionCwd` | 会话的**实时**目录（不是 `header.cwd`） |
-| `hint` | 一句话说明该做什么：由主会话调 `dsh_code_review` 工具，或你手动跑 `/review` |
-| `reviewScope` | 复审时的**窄范围**（修复涉及的文件/行）：按评审意见改完后只审这一片，不全量重审。**为 `null` 表示本轮没有可用基线**（首次评审 / 刚换了仓库 / 基线被淘汰 / 取证失败）→ **按全量审，不要沿用上一轮的窄范围** |
-
-评审的发起方只有两个：**agent 自己**调 `dsh_code_review` 工具；或**用户**亲手敲 `/review`。
-
-废弃的键：`autoReview` / `autoReviewCwd` / `autoReviewInput` / `autoReviewTimeoutMs` 四个键**已废弃**——
-保留只为兼容既有配置，传入不产生任何效果（执行路径已不存在）。
-早先那条「门禁拿 `ctx.commands.execute` 代跑 `/review`」的路子已删除：它与 agent 自己调工具
-会互相叠加（门禁代跑 → 报告回投 → 模型照提示再调一次 → 门禁又判需评审），实测出现无限评审，
-由 `tests/no-command-trigger.test.js` 反向断言钉住（`runCommand` 必须 0 次调用）。
-
-推回是独立开关：发布配置 `steer: false`（只记录状态、不推回）；设 `steer: true` 则门禁仍会把
-回合拉回一次、要求 agent 去评审。
-
-`dsh_code_review` 只允许在**主会话**调用（`lib/review-tool-policy.js`）：任何子 Agent 里调用都会被 `ctx.tools.guard()` 或 `pre-execute` 直接拒绝（理由串 `recursion-cut: ...`，可用 `DSH_*` 日志 grep 取证）。
-原因：该工具会 spawn 独立审查子 Agent，而审查子继承全局 `AGENTS.md` 的「开工先叫人」，可能反过来召唤 Agency 专家；专家又被要求「交付前跑一次评审」→ 再起审查子 → 成环（实测跑到 `delegationDepth=4`）。把工具限制在主会话，环的闭合边就不存在。
-这条守卫在 2026-11-11 随自研 fork 重新注册该工具而**重新生效**（此前上游 1.0.9+ 把工具改成斜杠命令，守卫一度没有任何命中点）。
-
-### 专家链路的例外（2026-11-12）
-
-专家插件（现为自研 fork `@jackchen13755/dsh-expert-agents`，插件 id `expert-agents`，原 `@michengai/dsh-agency-agents`）里的「代码审查工程师」已**改为在插件内直接调 code-review 引擎**（`runReview` + `renderOutcome`），不再调 `dsh_code_review` 工具。两个后果必须知道：
-
-1. 上面这条子 Agent 守卫**仍然只作用于 `dsh_code_review`**，不受影响，照旧生效。
-2. 这类由专家产出的评审**不产生 `tool/call` 事件**。门禁的判定是「本回合真的调过该工具」，因此**看不到**它们——不要把它当成「模型偷懒没评审」，也不要据此把回合推回去。若要把专家评审也计入，需要在观察层另加通道（`lib/observed.js`），不能靠放宽工具判定。
-
-递归面没有消失：审查子 Agent 若反过来召唤该专家，会再走同一引擎起一个审查子。靠两道一起兜——专家侧对召唤类工具的 deny 名单，加本文件的子 Agent 守卫。
-
-判定只有一条路：**本回合真的调过 `dsh_code_review`**——`tool/call` 加上成功结果，或一条覆盖当前 diff 的 `/review` 报告，才算已评审。
-
-| 情形 | 判定 | 为什么 |
+| 判据 | 规则 | 为什么 |
 |---|---|---|
-| 真调了 `dsh_code_review` | 通过（`ok`） | 主干路径，也是唯一路径 |
-| 没调用 `dsh_code_review` | 拦 | 唯一被接受的评审证据 |
+| 工具名 | `summon_expert` / `summon_experts`（含 `mcp__x__…` 命名空间变体；**不**做子串匹配） | 相似名字（`summon_expert_v2`）不能被当成评审入口 |
+| 专家名 | 精确别名：`代码审查工程师` / `engineering-code-reviewer` / `code-reviewer` / `engineering/code-reviewer` | 名字里带这几个字的别的东西（如「代码审查工程师助理」）不算 |
+| 批量 | `summon_experts` 里**任一位**是该专家就算 | 批量就是并发跑，评审真的发生了；要求「再单独叫一次」只会罚合理的批量 |
+| 结果 | 该次调用必须有成功结果 | 调了但挂了 / 没结果都不算（`call-failed` / `call-unresolved`） |
+| 发起方 | **主会话** | 子 Agent 的评审只当材料，不计入门禁证据 |
+| 新鲜度 | 评审之后不能再改代码（diff 摘要比对） | 审完又改 → `stale` |
 
-评审工具只剩 `dsh_code_review` 一个候选（`lib/gate.js` 的 `REVIEW_TOOLS` 里只有它），所以 `lib/verdict.js` 里**不存在**「自审顶替独立评审」的分支，也没有「工具不可用时改走自审」的退路。
-旧版的两件东西都已删除，别再照旧说明写：`review_brief` 取证工具（2026-11-10 删）与 `brief-self-review` 判决原因（已不在 `REASON_TEXT` 的八个原因里）。
+**已不适用（仅保留兼容，不再推荐）**：旧插件曾把评审报告作为用户消息注入会话
+（`source.kind = 'michengai-code-review'`）。本机不会再产生这类事件，`lib/review-report.js`
+留着只为「以后装回插件」时不把已评审误判成未评审。
+
+### 判定矩阵（每条都有正反断言）
+
+`tests/review-expert-evidence.test.js` 与 `tests/review-expert.test.js` 把下面这些格子逐个喂进去：
+
+| 输入 | 判定 | 备注 |
+|---|---|---|
+| 空 events / 没有 `tool/call` | 拦（`no-call`） | 正向对照：同样 diff 换成一次成功的专家评审 → 放行 |
+| 事件源不可得（session 缺失） | 放行 | `skipped: 'no-events'`，与「门禁坏了」可区分 |
+| `summon_expert("UI 设计师")` 成功 | 拦（`no-call`） | 叫了别的专家不等于评审 |
+| `summon_expert("代码审查工程师")` 成功 | 放行（`ok`） | 中文名与三种 slug 都被认 |
+| `summon_experts` 批量含审查工程师 | 放行（`ok`，`reviewTool: 'summon_experts'`） | 批量里只有别的专家 → 拦 |
+| 调用成功但结果 `isError` | 拦（`call-failed`） | 必须与「没调用」区分：排查方向不同 |
+| 宿主要记结果、但这条没有结果 | 拦（`call-unresolved`） | 宿主根本不记结果时按调用事实算 |
+| 评审后又改代码（digest 变） | 拦（`stale`） | 重审一次（新 callId）即放行 |
+| 子 Agent 发起的 summon | 不判（不 steer、也不记 `reviewed: true`） | 主会话不能继承子 Agent 的评审 |
+
+**能红一次**：把 `lib/review-expert.js` 的工具名判据改回只认 `dsh_code_review`，上面 9 条「专家评审 → 放行」的断言全红；
+`mutants.json` 里另有两条变异体（`review-expert.alias-match` / `review-expert.tool-name`）钉住「放宽判据」与「放开工具名」两个退化方向，
+由 `tests/canary/review-expert.test.js` 的具名断言杀死（`canary_verify` 可复跑）。
+
+### 子 Agent 守卫：只拦「指向审查工程师」的那一种召唤
+
+`lib/review-tool-policy.js` 的守卫对象变了：旧版拦 `dsh_code_review` 工具名（该工具已不存在，继续拦就是死逻辑），
+现在拦 **`summon_expert` / `summon_experts` 且 `expert` 指向代码审查工程师** 的调用。
+
+- 子 Agent 里这种调用会被 `ctx.tools.guard()`（或 `tools/pre-execute` 兜底）直接拒绝，
+  理由串以 `recursion-cut: ` 开头、并给出下一步（「交回主会话评审」）——可 grep 取证。
+- **不拦别的专家**：`summon_expert("UI 设计师")` 在子 Agent 里完全合法，否则队友就再也叫不到任何专家。
+- **看不到 arguments 时放行**：无法证明它叫的是审查工程师，宁可漏拦一次，也不能误杀所有专家调用。
+- 为什么需要它：审查工程师会起独立审查子 Agent，审查子继承全局 `AGENTS.md` 的「开工先叫人 / 交付前跑一次评审」，
+  可能反过来再召唤同一专家 → 再起审查子 → 成环（实测跑到 `delegationDepth=4`）。
+- 刻意**不做** `restrict()` 自愈：`summon_expert` 是共享工具（同一个还能叫别的专家），摘掉它会把合法用途一起废掉。
 
 ### 「确认没改」与「取证坏了」必须能区分
 
@@ -170,7 +158,7 @@ lens 调用**失败不算数**（与评审同样要求成功）；非结构性�
 - 每回合最多推回 **1** 次；每会话最多 **3** 次（必须有会话级：`payload.turn` 可能缺失，只靠回合计数会被反复重置 —— 这个坑上游插件实测踩到过，被推回 4 次）。
 - 预算耗尽时**如实放行**并在日志说明，不静默。
 - fail-open 的情形：diff 不可得（非 git 仓 / git 超时）、拿不到会话事件源、工具没装、门禁被关。理由：**「永远无法收工」比「漏检一次」更糟**。
-- 子 agent **一律不参与门禁**（契约，不是开关）：`dsh_code_review` 在子 Agent 里被硬拦，它没有可用的评审载体——再拦只会把它推进一个永远满足不了的要求（无限推回）。子 agent 的改动由主会话收口时统一评审。旧配置项 `gateSubagents` 已删除，避免「配置说开、实际不开」。
+- 子 agent **一律不参与门禁**（契约，不是开关）：评审证据只认主会话的调用，子 Agent 的评审只当材料——再拦只会把它推进一个永远满足不了的要求（无限推回）。子 agent 的改动由主会话收口时统一评审。旧配置项 `gateSubagents` 已删除，避免「配置说开、实际不开」。
 
 ## 关闭
 

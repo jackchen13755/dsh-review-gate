@@ -71,7 +71,15 @@ test('没评审时，即使 lens 跑过也仍然不通过（lens 不能替代评
 
 const callEvent = (turn, name, callId) => ({
   type: 'tool/call',
-  data: { turn, step: 1, callId, name, arguments: '{}' },
+  data: {
+    turn,
+    step: 1,
+    callId,
+    name,
+    arguments: name === 'summon_expert' || name === 'summon_experts'
+      ? JSON.stringify({ expert: '代码审查工程师', task: '审查未提交的更改' })
+      : '{}',
+  },
 });
 const resultEvent = (turn, callId) => ({
   type: 'tool/result',
@@ -101,7 +109,7 @@ const journalUnknown = async () => ({ verdict: 'unknown' });
 test('新增代码文件 + 只评审不跑 lens → 必须拦住，且文本点名要求 lens', async () => {
   clearGateState();
   applyConfig({ gate: true });
-  const agent = makeAgent({ events: [callEvent(1, 'dsh_code_review', 'c1'), resultEvent(1, 'c1')] });
+  const agent = makeAgent({ events: [callEvent(1, 'summon_expert', 'c1'), resultEvent(1, 'c1')] });
 
   const text = await handleTurnStopping(
     { agent, turn: 1 },
@@ -119,7 +127,7 @@ test('新增代码文件 + 评审 + lens 都跑过 → 放行', async () => {
   applyConfig({ gate: true });
   const agent = makeAgent({
     events: [
-      callEvent(1, 'dsh_code_review', 'c1'), resultEvent(1, 'c1'),
+      callEvent(1, 'summon_expert', 'c1'), resultEvent(1, 'c1'),
       callEvent(1, 'lens', 'c2'), resultEvent(1, 'c2'),
     ],
   });
@@ -135,7 +143,7 @@ test('新增代码文件 + 评审 + lens 都跑过 → 放行', async () => {
 test('普通代码修改 + 只评审不跑 lens → 放行（不额外要求 lens）', async () => {
   clearGateState();
   applyConfig({ gate: true });
-  const agent = makeAgent({ events: [callEvent(1, 'dsh_code_review', 'c1'), resultEvent(1, 'c1')] });
+  const agent = makeAgent({ events: [callEvent(1, 'summon_expert', 'c1'), resultEvent(1, 'c1')] });
 
   const plainDiff = {
     available: true,
@@ -155,7 +163,7 @@ test('lens 调用失败不算数（和评审一样要求成功）', async () => 
   applyConfig({ gate: true });
   const agent = makeAgent({
     events: [
-      callEvent(1, 'dsh_code_review', 'c1'), resultEvent(1, 'c1'),
+      callEvent(1, 'summon_expert', 'c1'), resultEvent(1, 'c1'),
       callEvent(1, 'lens', 'c2'),
       { type: 'tool/result', data: { turn: 1, step: 2, message: { role: 'tool', source: { kind: 'tool', callId: 'c2' }, isError: true, content: [] } } },
     ],

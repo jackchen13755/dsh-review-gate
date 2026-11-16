@@ -19,9 +19,10 @@ function makeAgent({ id = 's1', depth = 0, events = [], cwd = '/tmp/work' } = {}
   return agent;
 }
 
+// 唯一评审证据：主会话召唤「代码审查工程师」专家（2026-11-16 起；旧的 dsh_code_review 工具已卸载）
 const callEvent = (turn, callId = 'c1') => ({
   type: 'tool/call',
-  data: { turn, step: 1, callId, name: 'dsh_code_review', arguments: '{}' },
+  data: { turn, step: 1, callId, name: 'summon_expert', arguments: JSON.stringify({ expert: '代码审查工程师', task: '审查未提交的更改' }) },
 });
 const resultEvent = (turn, callId = 'c1', text = '完成') => ({
   type: 'tool/result',
@@ -66,7 +67,7 @@ test('M1（红）：改动命中配置类文件但没评审 → 必须 steer', a
 
   assert.ok(text, '必须返回 steer 文本');
   assert.equal(agent.steered.length, 1, '必须真的调用了 agent.steer');
-  assert.match(text, /dsh_code_review/, 'steer 文本要指名修复动作');
+  assert.match(text, /summon_expert/, 'steer 文本要指名修复动作（唯一入口是召唤审查工程师）');
   assert.match(text, /config/, '要说明命中的原因');
 });
 
@@ -203,14 +204,15 @@ test('默认不推回：命中触发规则也只记状态（评审工具已恢�
   assert.equal(agent.steered.length, 0, '不该调用 agent.steer');
   const st = statusOf(agent.id).last;
   assert.equal(st.needsAgentReview, true, '状态里必须标出「该由 agent 自己评审」');
-  assert.match(String(st.hint), /dsh_code_review/, '提示要指向模型可调用的工具');
+  assert.match(String(st.hint), /代码审查工程师/, '提示要指向审查工程师');
+  assert.match(String(st.hint), /summon_expert/, '提示要给出可复制的调用形态');
   assert.equal(st.reviewRoot, '/tmp/work', '必须记录「评审该指向哪棵树」= 会话目录');
   assert.deepEqual(lines, [], '门禁不得再代跑 /review');
 });
 
-test('子 agent 一律不拦：评审工具被禁在子 Agent 之外，它没有可用载体', async () => {
-  // 2026-11-10 契约变更：dsh_code_review 只允许主会话调用（lib/review-tool-policy.js），
-  // 子 Agent 里没有任何被接受的评审载体——再拦就是把它推进一个永远满足不了的要求。
+test('子 agent 一律不拦：评审证据只认主会话，子 Agent 里没有可用载体', async () => {
+  // 契约（2026-11-16 沿用）：门禁只认主会话的专家评审调用；子 Agent 的评审只当材料，
+  // 再拦就是把它推进一个永远满足不了的要求（无限推回）。
   setup();
   const agent = makeAgent({ depth: 1, events: [] });
   const text = await handleTurnStopping(

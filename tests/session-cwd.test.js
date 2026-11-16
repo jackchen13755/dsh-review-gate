@@ -10,7 +10,7 @@
  * 2026-11-11 契约变更后，门禁不再代跑 /review（见 tests/no-command-trigger.test.js）。
  * 但「评审必须指向正确的树」这条本意不变，只是载体从「命令行里的 --cwd」变成
  * `statusOf(sid).last.reviewRoot`：门禁负责算准并在状态里写明该审哪棵树，
- * 再由此刻唯一被允许发起评审的一方（agent 调 dsh_code_review，或用户敲 /review）照着做。
+ * 再由此刻唯一被允许发起评审的一方（主会话调用 summon_expert 把改动交给代码审查工程师）照着做。
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -135,7 +135,8 @@ test('目录已切走（stale）→ 不替模型发起评审，改为让 agent �
   assert.equal(st.needsAgentReview, true, '仍必须把「该评审了」写进状态');
   assert.equal(st.reviewRoot, '/w/wt/feat', '必须指向实时目录，不能用 header.cwd=/w/main');
   assert.equal(st.sessionCwd, '/w/wt/feat');
-  assert.match(String(st.hint), /dsh_code_review/, '提示要指向 agent 自己能调的工具');
+  assert.match(String(st.hint), /代码审查工程师/, '提示要指向主会话自己能发起的评审入口');
+  assert.match(String(st.hint), /summon_expert/, '并给出可复制的调用形态');
   // 旧说法「第三方会按创建时目录取 diff」已过时：现在发起方是 agent 自己，
   // 它按 reviewRoot 指定目录即可，不能再把责任推给第三方的 header 取值。
   assert.doesNotMatch(String(st.hint), /第三方/, 'hint 不得再声称第三方会按 header 取 diff');
@@ -245,7 +246,7 @@ test('不支持 --cwd 时（autoReviewCwd=false）→ 不代跑，改为把目�
   const agent = makeAgent({ cwd: '/w/repo' });
   // 旧契约：不支持 --cwd 就「拒绝自动评审 + 提示去目标目录开会话」。
   // 新契约下门禁本来就不代跑命令，但它仍必须把目标路径算准并留下——
-  // agent 据此给 dsh_code_review 指定正确的树，否则又会审错地方。
+  // 主会话据此把正确的树写进专家任务书，否则专家会审错地方。
   const lines = [];
   await handleTurnStopping(
     { agent, turn: 1 },

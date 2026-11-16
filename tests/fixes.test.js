@@ -12,8 +12,18 @@ import { clearObserved, observedSnapshot, recordWrite } from '../lib/observed.js
 // ============================================================ F1（blocker）
 // 「派发了评审但没有 tool/result」曾被当成已评审 —— 主判据上的静默 fail-open。
 
-const call = (turn, callId = 'c1', name = 'dsh_code_review') => ({
-  type: 'tool/call', data: { turn, step: 1, callId, name, arguments: '{}' },
+// 评审证据 = summon_expert 点名「代码审查工程师」（旧的 dsh_code_review 工具已卸载）
+const call = (turn, callId = 'c1', name = 'summon_expert', args) => ({
+  type: 'tool/call',
+  data: {
+    turn,
+    step: 1,
+    callId,
+    name,
+    arguments: args ?? (name === 'summon_expert' || name === 'summon_experts'
+      ? JSON.stringify({ expert: '代码审查工程师', task: '审查未提交的更改' })
+      : '{}'),
+  },
 });
 const result = (turn, callId = 'c1', text = 'ok', isError = false) => ({
   type: 'tool/result',
@@ -24,7 +34,7 @@ const otherResult = (turn) => result(turn, 'other-call', 'x');
 
 test('F1：宿主会记结果，但这条评审没有结果 → 不能算已评审', () => {
   const events = [call(1, 'c1'), otherResult(1)];
-  const r = reviewCallInTurn(events, { turn: 1 });
+  const r = reviewCallInTurn(events, { toolName: 'summon_expert', turn: 1 });
   assert.equal(r.seen, false, '「派发了但没结果」必须判为未评审');
   assert.equal(r.unresolved, true, '并且要能区分出「未完成」而不是「没调用」');
 });
@@ -32,13 +42,13 @@ test('F1：宿主会记结果，但这条评审没有结果 → 不能算已评�
 test('F1 对照：宿主根本不记结果时，按调用事实算（不能误伤这类宿主）', () => {
   const events = [call(1, 'c1')]; // 没有任何 tool/result
   assert.equal(hostEmitsResults(events), false);
-  const r = reviewCallInTurn(events, { turn: 1 });
+  const r = reviewCallInTurn(events, { toolName: 'summon_expert', turn: 1 });
   assert.equal(r.seen, true, '宿主不记结果时不能一律判失败，否则这类宿主永远收不了工');
 });
 
 test('F1：结果明确失败仍然不算', () => {
   const events = [call(1, 'c1'), result(1, 'c1', 'REVIEW_FAILED')];
-  const r = reviewCallInTurn(events, { turn: 1 });
+  const r = reviewCallInTurn(events, { toolName: 'summon_expert', turn: 1 });
   assert.equal(r.seen, false);
   assert.equal(r.unresolved, false, '这是「失败」，不是「未完成」');
 });
@@ -227,9 +237,9 @@ test('评审已发起但结果未回：不该 steer，也不该扣预算（主�
   applyConfig({ gate: true, gateMaxSteersPerTurn: 1, gateMaxSteersPerSession: 1 });
 
   const { reveal } = await (async () => {
-    // 构造：本回合调过 dsh_code_review，但没有 tool/result（结果未回）
+    // 构造：本回合派发了专家评审，但没有 tool/result（结果未回）
     const events = [
-      { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'dsh_code_review', arguments: '{}' } },
+      { type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'summon_expert', arguments: JSON.stringify({ expert: '代码审查工程师', task: '审查未提交的更改' }) } },
       { type: 'tool/result', data: { turn: 1, step: 2, message: { role: 'tool', source: { kind: 'tool', callId: 'other' }, content: [] } } },
     ];
     return { reveal: events };

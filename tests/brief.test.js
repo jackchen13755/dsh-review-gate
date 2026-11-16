@@ -56,13 +56,6 @@ test('超长改动会被截断，不撑爆上下文', () => {
   assert.match(text, /另有 \d+ 个文件未展示/);
 });
 
-// ---------------------------------------------------------------- 门禁接受双工具
-
-const callEvent = (turn, name, callId) => ({ type: 'tool/call', data: { turn, step: 1, callId, name, arguments: '{}' } });
-const resultEvent = (turn, callId) => ({
-  type: 'tool/result',
-  data: { turn, step: 2, message: { role: 'tool', source: { kind: 'tool', callId }, content: [{ type: 'text', text: 'ok' }] } },
-});
 const cfgDiff = (digest = 'B1') => ({
   available: true, digest,
   files: [{ path: 'package.json', status: 'M', added: ['x'], removed: [] }],
@@ -79,7 +72,7 @@ function makeAgent(sid, events) {
   };
 }
 
-test('没有调 dsh_code_review → 拦', async () => {
+test('没有召唤代码审查工程师 → 拦', async () => {
   clearGateState();
   applyConfig({ gate: true });
   const agent = makeAgent('brief-none', []);

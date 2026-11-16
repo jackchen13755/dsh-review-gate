@@ -80,7 +80,7 @@ function makeAgent({ id = 'agent-1', sid = 'sess-1', events = [], cwd = '/repo' 
   };
 }
 
-const callEvent = (turn) => ({ type: 'tool/call', data: { turn, step: 1, callId: 'c1', name: 'dsh_code_review', arguments: '{}' } });
+const callEvent = (turn) => ({ type: 'tool/call', data: { turn, step: 1, callId: 'c1', name: 'summon_expert', arguments: JSON.stringify({ expert: '代码审查工程师', task: '审查未提交的更改' }) } });
 const resultEvent = (turn) => ({ type: 'tool/result', data: { turn, step: 2, message: { role: 'tool', source: { kind: 'tool', callId: 'c1' }, content: [{ type: 'text', text: '完成' }] } } });
 
 test('非 git 目录：写了配置类文件 → 降级模式也要拦住', async () => {

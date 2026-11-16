@@ -164,7 +164,7 @@ function makeAgent({ id = 's1', events = [], cwd = '/tmp/work' } = {}) {
 
 const callEvent = (turn, callId = 'c1') => ({
   type: 'tool/call',
-  data: { turn, step: 1, callId, name: 'dsh_code_review', arguments: '{}' },
+  data: { turn, step: 1, callId, name: 'summon_expert', arguments: JSON.stringify({ expert: '代码审查工程师', task: '审查未提交的更改' }) },
 });
 const resultEvent = (turn, callId = 'c1') => ({
   type: 'tool/result',

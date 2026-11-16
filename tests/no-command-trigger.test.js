@@ -1,12 +1,13 @@
 /**
- * 2026-11-11 契约变更：门禁**不再**替模型执行 /review。
+ * 2026-11-11 契约变更：门禁**不再**替模型执行任何命令（曾经代跑 `/review`）。
  *
- * 用户决定：`dsh_code_review` 已恢复为模型可调用工具，所以删掉门禁那条命令触发路径。
+ * 用户决定：删掉门禁那条命令触发路径（当时评审入口还是工具，现已换成专家评审，
+ * 但「门禁绝不代跑命令」这条不变）。
  * 原因是两条触发路径会互相叠加 —— 门禁代跑一次 → 报告回投 → 模型照提示再调一次工具
  * → 门禁又判定「需评审」→ 再代跑……实测出现无限评审（主 agent 收到结果后不修复，
  * 直接又触发评审）。
  *
- * 现在唯一的发起方是模型自己（或用户敲 /review）。门禁的职责只剩：判定、记录、
+ * 现在唯一的发起方是主会话自己（调 summon_expert 交给代码审查工程师）。门禁的职责只剩：判定、记录、
  * 在需要时把「该评审了」明确写进状态里（可观测，但不代劳）。
  *
  * 所以这一组用例的核心断言是**反向**的：无论输入怎么构造，runCommand 都不得被调用。
@@ -57,10 +58,11 @@ test('需要评审时不执行任何命令（无限循环的根因已移除）',
     readJournal: journalUnknown,
     runCommand: spy.runCommand,
   });
-  assert.deepEqual(spy.lines, [], '门禁不得再代跑 /review');
+  assert.deepEqual(spy.lines, [], '门禁不得再代跑任何命令');
   const last = statusOf('s1').last;
   assert.equal(last.needsAgentReview, true, '必须明确记录「该由 agent 评审」');
-  assert.match(last.hint, /dsh_code_review/, '提示要指向真正的入口');
+  assert.match(last.hint, /代码审查工程师/, '提示要指向真正的入口（专家评审）');
+  assert.match(last.hint, /summon_expert/, '并给出可复制的调用形态');
 });
 
 test('即使传入旧配置 autoReview=true 也不执行命令（开关已无执行路径）', async () => {

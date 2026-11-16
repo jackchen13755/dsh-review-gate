@@ -40,7 +40,7 @@ function makeAgent({ id = 's1', events = [], cwd = '/tmp/work' } = {}) {
 
 const callEvent = (turn, callId = `c${turn}`) => ({
   type: 'tool/call',
-  data: { turn, step: 1, callId, name: 'dsh_code_review', arguments: '{}' },
+  data: { turn, step: 1, callId, name: 'summon_expert', arguments: JSON.stringify({ expert: '代码审查工程师', task: '审查未提交的更改' }) },
 });
 const resultEvent = (turn, callId = `c${turn}`) => ({
   type: 'tool/result',
@@ -123,7 +123,8 @@ test('F2 换仓后的首次评审是全量（hint 不许说「不要全量重审
 
   const hint = String(statusOf('switch-first').last?.hint ?? '');
   assert.doesNotMatch(hint, /不要全量重审/, 'repoB 没有基线 → 提示必须是全量，不能说「只审这几个文件」');
-  assert.match(hint, /dsh_code_review/, '全量提示仍要给出该做什么');
+  assert.match(hint, /代码审查工程师/, '全量提示仍要给出该做什么（召唤审查工程师）');
+  assert.match(hint, /summon_expert/, '并且给出可复制的调用形态');
 });
 
 test('F3 切回 repoA 仍用 repoA 自己的基线（repoB 的评审不得覆盖它）', async () => {

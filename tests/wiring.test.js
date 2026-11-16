@@ -258,11 +258,54 @@ test('必须声明 inject 依赖 tools（否则 ctx.tools 未就位、工具注�
   assert.ok(mod.inject.includes('tools'), 'inject 必须包含 tools —— v0.4.0 及之前漏了这条，review_gate_status 在所有会话里都不存在');
 });
 
-test('渲染的 steer 文本必须给出「没有工具时怎么办」的退路', async () => {
+// ---------------------------------------- 守卫接线（2026-11-16，守卫对象换成 summon 专家）
+//
+// 纯函数单测（tests/policy.test.js）证明不了「apply 把 arguments 传进判定器了」：
+// 命令里漏传 arguments 时判定器永远读不到专家名 → 守卫变成装饰性代码，测试仍全绿。
+// 这条用例从 apply() 拿真实注册的 guard 回调，喂一个 execution 对象进来断言。
+
+function makeGuardCtx() {
+  const guards = [];
+  const ctx = {
+    on: () => () => {},
+    effect: (fn) => { const d = fn(); return () => (typeof d === 'function' ? d() : undefined); },
+    tools: { register: () => () => {}, guard: (fn) => { guards.push(fn); return () => {}; } },
+    logger: { info() {}, warn() {} },
+  };
+  return { ctx, guards };
+}
+
+test('守卫接线：子 Agent 召唤审查工程师被 apply 注册的 guard 拒掉，别的专家照常放行', () => {
+  applyConfig({ gate: true });
+  const { ctx, guards } = makeGuardCtx();
+  apply(ctx, { gate: true });
+  assert.equal(guards.length, 1, '宿主有 ctx.tools.guard() 时必须挂上守卫');
+
+  const subExec = (argumentsObject) => ({
+    name: 'summon_expert',
+    arguments: argumentsObject,
+    agent: { id: 'sub', session: { header: { delegationDepth: 1 } } },
+  });
+
+  const denied = guards[0](subExec({ expert: '代码审查工程师', task: '审查' }));
+  assert.equal(typeof denied, 'string', '子 Agent 召唤审查工程师必须被拒，且返回可 grep 的理由串');
+  assert.match(denied, /^recursion-cut: /);
+
+  // 反向：同一 guard 不能把「叫别的专家」也拦掉（否则队友叫不到任何专家）
+  assert.equal(guards[0](subExec({ expert: 'UI 设计师', task: '看稿' })), undefined);
+
+  // 正向：主会话（depth 0）召唤审查工程师必须放行
+  const mainExec = subExec({ expert: '代码审查工程师', task: '审查' });
+  mainExec.agent.session.header.delegationDepth = 0;
+  assert.equal(guards[0](mainExec), undefined);
+});
+
+test('渲染的 steer 文本必须给出「没有评审入口时怎么办」的退路', async () => {
   const { renderGateText } = await import('../lib/gate.js');
   const text = renderGateText(['config'], { files: [{}], partial: false });
-  assert.match(text, /dsh_code_review/);
-  assert.match(text, /没有 .* 这个工具|本会话没有/, '拿不到工具的会话需要有诚实的退路，不能静默收工');
+  assert.match(text, /代码审查工程师/, '要指名唯一入口');
+  assert.match(text, /summon_expert/, '并且给出可复制的调用形态');
+  assert.match(text, /没有 summon_expert|本会话无评审入口/, '拿不到入口的会话需要有诚实的退路，不能静默收工');
 });
 
 test('端到端：write 新建文件 → created 必须在写入前判定（这条是实机失败后补的）', async () => {

@@ -59,20 +59,22 @@ test('注入一个 review-first 分节，且位置在工具指引之前', () => 
   assert.equal(typeof sec.text, 'function', 'text 应为函数，便于按配置动态返回');
 });
 
-// 契约在 2026-11-11 反转：评审工具 `dsh_code_review` 重新注册（用户要求 agent 可触发），
-// 于是「模型无法自己调用」这句不再成立。本用例改为钉住**新**契约：
-// 两条路径都要写清（工具 + 命令），且必须明说子 Agent 不要调用（否则递归环复活）。
-test('提示词必须讲清两种评审入口（工具 + 命令）、不再推回、子 Agent 禁止调用', () => {
+// 契约在 2026-11-16 再变：第三方 code-review 插件卸载，`dsh_code_review` 工具与 `/review`
+// 命令都不存在了。本用例钉住**新**契约：只写「召唤代码审查工程师」一条路，
+// 并且必须写清「子 Agent 调了也不算」——否则模型会去够一个不存在的东西，永远满足不了门禁。
+test('提示词必须只写一条评审入口（召唤审查工程师）、不再推回、子 Agent 不算', () => {
   applyConfig({ gate: true });
   const { ctx, sections } = makeCtx();
   apply(ctx, { gate: true });
   const text = sections.find((s) => s.name === 'review-gate:review-first').text();
 
-  assert.match(text, /dsh_code_review/, '必须写明主会话可直接调用评审工具（否则模型不知道能用它）');
-  assert.match(text, /\/review/, '命令路径仍要写明（异步投递、可 --cwd）');
+  assert.match(text, /summon_expert/, '必须写明唯一入口是召唤专家');
+  assert.match(text, /代码审查工程师/, '必须指名是「代码审查工程师」（叫别的专家不算评审）');
+  assert.match(text, /summon_expert\("代码审查工程师"/, '要给出可复制的调用形态，而不是只说「去评审」');
   assert.match(text, /不会再把回合推回|不会.*推回/, '必须说明不再推回，否则模型会做无用的自救');
-  assert.doesNotMatch(text, /模型无法自己调用|不再提供工具/, '工具已恢复，这句会让模型放弃调用');
-  assert.match(text, /子 Agent[\s\S]{0,40}(不要调用|拿不到|一律)/, '必须讲清子 Agent 不得调用（递归保护）');
+  assert.doesNotMatch(text, /dsh_code_review/, '旧工具已卸载：再教模型去调它，等于让它够一个不存在的东西');
+  assert.doesNotMatch(text, /\/review/, '旧斜杠命令已随插件卸载，不得再作为评审路径推荐');
+  assert.match(text, /子 Agent[\s\S]{0,40}(不算|不要调用|拿不到|一律)/, '必须讲清子 Agent 的评审不算证据（否则它会以为已经评审过）');
   assert.match(text, /不要只提醒用户/, '收尾时该自己取证，不能把取证推给用户');
   assert.doesNotMatch(text, /review_brief/, '自有取证工具已删，不能再出现在提示词里');
   assert.match(text, /lens/, '结构性改动要提 lens');

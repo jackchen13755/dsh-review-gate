@@ -78,9 +78,18 @@ test('journal 路径按 agent.id 做 sha256 且稳定', () => {
 
 // ---------------------------------------------------------------- replay
 
-const callEvent = (turn, name = 'dsh_code_review', callId = 'c1') => ({
+// 评审证据：summon_expert 点名「代码审查工程师」。name 可改，用来构造「叫别的工具/专家」的反例。
+const callEvent = (turn, name = 'summon_expert', callId = 'c1', args) => ({
   type: 'tool/call',
-  data: { turn, step: 1, callId, name, arguments: '{}' },
+  data: {
+    turn,
+    step: 1,
+    callId,
+    name,
+    arguments: args ?? (name === 'summon_expert' || name === 'summon_experts'
+      ? JSON.stringify({ expert: '代码审查工程师', task: '审查未提交的更改' })
+      : '{}'),
+  },
 });
 
 const resultEvent = (callId = 'c1', text = 'ok') => ({
@@ -96,12 +105,33 @@ test('eventsOf：三种形态按序取，且区分「不可得」与「空」', 
 });
 
 test('findCalls：按回合精确匹配，不把别的回合算进来', () => {
-  const events = [callEvent(1), callEvent(2, 'dsh_code_review', 'c2'), callEvent(1, 'bash', 'c3')];
-  assert.equal(findCalls(events, { turn: 1 }).length, 1);
-  assert.equal(findCalls(events, { turn: 1 })[0].callId, 'c1');
-  assert.equal(findCalls(events, { turn: 9 }).length, 0);
+  const events = [callEvent(1), callEvent(2, 'summon_expert', 'c2'), callEvent(1, 'bash', 'c3')];
+  const names = { toolNames: ['summon_expert', 'summon_experts'] };
+  assert.equal(findCalls(events, { ...names, turn: 1 }).length, 1);
+  assert.equal(findCalls(events, { ...names, turn: 1 })[0].callId, 'c1');
+  assert.equal(findCalls(events, { ...names, turn: 9 }).length, 0);
   // turn 缺失时退化为整会话匹配
-  assert.equal(findCalls(events, {}).length, 2, '两个 review 调用都应被找到，bash 不算');
+  assert.equal(findCalls(events, names).length, 2, '两次 summon 都应被找到，bash 不算');
+});
+
+test('findCalls：不点名工具名时返回空，绝不猜默认值（旧实现默认 dsh_code_review 的静默失败）', () => {
+  const events = [callEvent(1), callEvent(1, 'bash', 'c2')];
+  assert.deepEqual(findCalls(events, {}), [], '没有 toolName/toolNames 时必须一个都不返回，否则会把不相干的工具当评审');
+  assert.deepEqual(findCalls(events), []);
+  assert.equal(findCalls(events, { toolName: 'summon_expert' }).length, 1, '显式点名才生效');
+});
+
+test('findCalls 的 match 谓词：语义过滤失败的一律不算', () => {
+  const events = [
+    callEvent(1, 'summon_expert', 'c1'),
+    callEvent(1, 'summon_expert', 'c2', JSON.stringify({ expert: 'UI 设计师' })),
+  ];
+  const hits = findCalls(events, {
+    toolNames: ['summon_expert'],
+    match: (call) => String(call.arguments).includes('代码审查工程师'),
+  });
+  assert.equal(hits.length, 1, '只该命中叫审查工程师的那一次');
+  assert.equal(hits[0].callId, 'c1');
 });
 
 test('resultOkFor：失败信号能被识别（含 REVIEW_FAILED 文本）', () => {
@@ -113,10 +143,10 @@ test('resultOkFor：失败信号能被识别（含 REVIEW_FAILED 文本）', () 
 
 test('reviewCallInTurn：失败的调用不算数', () => {
   const failed = [callEvent(1), resultEvent('c1', 'REVIEW_FAILED')];
-  assert.equal(reviewCallInTurn(failed, { turn: 1 }).seen, false);
+  assert.equal(reviewCallInTurn(failed, { toolName: 'summon_expert', turn: 1 }).seen, false);
 
   const ok = [callEvent(1), resultEvent('c1', '完成')];
-  assert.equal(reviewCallInTurn(ok, { turn: 1 }).seen, true);
+  assert.equal(reviewCallInTurn(ok, { toolName: 'summon_expert', turn: 1 }).seen, true);
 });
 
 // ------------------------------------------- 假绿回归（2026-11-06，阶段 A）
@@ -143,21 +173,21 @@ test('假绿②的优先级：「评审已发起未完成」优先于「审完�
 
 test('假绿①：reviewCallInTurn 必须把「失败」与「未调用」分开上报', () => {
   const failed = [callEvent(1), resultEvent('c1', 'REVIEW_FAILED')];
-  const r = reviewCallInTurn(failed, { turn: 1 });
+  const r = reviewCallInTurn(failed, { toolName: 'summon_expert', turn: 1 });
   assert.equal(r.seen, false, '失败的调用不算已评审');
   assert.equal(r.failed, true, '但必须标记 failed，否则上层只能报 no-call');
 
   // 一次失败 + 一次成功 → 成功优先，且不算失败
   const mixed = [
-    callEvent(1, 'dsh_code_review', 'c1'), resultEvent('c1', 'REVIEW_FAILED'),
-    callEvent(1, 'dsh_code_review', 'c2'), resultEvent('c2', '完成'),
+    callEvent(1, 'summon_expert', 'c1'), resultEvent('c1', 'REVIEW_FAILED'),
+    callEvent(1, 'summon_expert', 'c2'), resultEvent('c2', '完成'),
   ];
-  const m = reviewCallInTurn(mixed, { turn: 1 });
+  const m = reviewCallInTurn(mixed, { toolName: 'summon_expert', turn: 1 });
   assert.equal(m.seen, true);
   assert.equal(m.failed, false, '另一条成功的评审已覆盖，不该再报失败');
 
   // 从没调用过 → 既不是 failed 也不是 unresolved
-  const none = reviewCallInTurn([], { turn: 1 });
+  const none = reviewCallInTurn([], { toolName: 'summon_expert', turn: 1 });
   assert.equal(none.failed, false);
   assert.equal(none.unresolved, false);
 });
