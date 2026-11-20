@@ -175,6 +175,58 @@ gate: false
 
 `review_gate_status`（只读）：最近一次判定的原因、触发规则、预算余量、已评审摘要前缀。它不改变任何状态。
 
+## 陪审团（M5，默认关闭）
+
+三席固定：`fact`（事实派）/ `opposition`（反方派）/ `gap`（缺口派）。每人投一票，
+判决层（`lib/jury.js`，纯函数）做多数决：
+
+| 聚合判决 | 条件 | 是否放行 |
+|---|---|---|
+| `pass` | pass 票达到门槛 `floor(n/2)+1`（三席取 2）**且三席齐备** | ✅ 唯一放行态 |
+| `fail` | fail 票达到多数门槛 | ❌ |
+| `topped` | ≥2 票 `insufficient` 且其中 ≥2 票 `boundary='external'`（问题超出可评审边界，多数决不适用） | ❌ |
+| `unclear` | 有效票全为 `undecidable`，或没有判决达到多数门槛 | ❌ |
+| `unavailable` | 无有效票 / 票非法 / 票没投满三席 / 票与当前 diff 摘要不一致 / 读不到票箱 | ❌ |
+
+开关（默认全关；`enabled=false` 时连工具都不注册）：
+
+```yaml
+jury:
+  enabled: true       # 注册 jury_vote / jury_status，开始读票箱
+  requireJury: true   # 把票型并入判决：通过 = 既有判定通过 ∧ jury pass
+```
+
+- `jury_vote`：主会话登记一票。**每票必须绑证据与版本**：
+  - `basisKind` / `basisRef`（必填）：`expert` = 本会话一次**成功**的「代码审查工程师」调用 `callId`；
+    `canary` = 一份 `verified` 变异检定回执里的被杀变异体 id（或 `verified`）；
+    `file` = 本会话**写过**的文件路径（相对仓库根或绝对路径）。指认不到一律拒收。
+  - **`pass` 票只接受 `expert` 证据**：`file` / `canary` 只能说明「我看过 / 我跑过」，
+    说明不了「我同意放行」，它们只允许支撑 `insufficient` / `fail`。
+  - **三票必须指认三个不同的、本回合发生的事实**：`basis.ref` 重复（同一个 `callId` /
+    同一个文件，绝对与相对写法也算同一个）→ `unavailable`；`expert` 调用还必须发生在
+    门禁采到这版 diff 摘要的那一回合或之后，上一版 diff 的旧调用不能给这一版投票。
+    这就是「三个视角」在实现里的真实含义：三条彼此不同、本回合可核验的证据，而不是三次工具调用。
+  - 票自动绑上门禁算出的**当前 diff 摘要**（不接受调用方自报），页面上看不到这个参数。
+    **票必须等门禁采到本回合 diff 摘要后才能投**：拿不到摘要一律拒收（见下方「恢复路径」）。
+  - `action=status` 只读查看，`action=reset` 清空。同一角色再投 = 改票。
+- `jury_status`：只读查看当前票型、每票绑定的证据/摘要与聚合判决。
+- 票箱：`$DSH_HOME/review-gate/jury/<sha256(sessionId)>.json`（**不是**第三方 code-review 的 `$DSH_HOME/code-review/`，那个目录只读）。
+- **票必须和当前这版 diff 对得上**：任何一票的摘要与当前不同（含没有摘要的旧票），整份票型判 `unavailable`——
+  上一版的 pass 不能拿去放行改了之后的代码。同一 digest 的后续取证**不会**让已投的票失效
+  （「这版 diff 从哪回合存在」取首次观察回合，不是最后一次看它的回合）。
+- **坏票 = 整份票型不可用**：票箱里出现一张非法票时不做「静默丢弃」（否则 `[pass,pass,坏,pass]` 会被读成 3 张好票），
+  门禁判 `unavailable`，需 `jury_vote(action:'reset')` 后重投。
+- 票型只在**确实用它放行**之后消费（三席齐备 + `requireJury=true` + 命中触发规则 + 非运维回合）：
+  运维回合与 denied 回合不吃票（denied 的票已绑摘要，代码改了自然对不上）。
+- `requireJury=true` 但 `jury.enabled` 未开时会 `console.warn` 一次并忽略 `requireJury`——
+  「以为在拦、实际没拦」是本插件最反对的失效形态。
+- `requireJury=false`（或 `enabled=false`）时 `decideReview` 的返回**逐字段不变**，既有测试与旧行为不受影响。
+
+**恢复路径（第一次投票常见）**：如果 `jury_vote` 回「缺少 digest……门禁还没有可用的 diff 摘要」，
+说明本会话还没被门禁取证过（插件刚加载 / 这一轮还没结束）。先让门禁跑过一轮（回合结束时的
+turn-stopping，或下一步的 pre-step 会采到 diff），再重新投票即可；**不要**自己伪造摘要，
+工具不接受调用方自报的 digest。
+
 ## 提示词里的工作流约定（R16–R18）
 
 插件往**每个会话**的系统提示注入一段约定（`lib/index.js` 的 `REVIEW_FIRST_PROMPT`）。除「什么改动要评审」「谁去发起评审」，还钉了三条工作流：
@@ -202,7 +254,7 @@ dsh plugin add github:jackchen13755/dsh-review-gate
 dsh plugin add link:/path/to/dsh-review-gate
 ```
 
-配置写在 `cordis.patch.yml` 的 `config` 段，可调项：`gate`、`gateMaxSteersPerTurn`、`gateMaxSteersPerSession`、`removalThreshold`、`volumeThreshold`、`reviewAnyCodeChange`、`canaryShadow`、`ignoreGlobs`、`extraTriggerGlobs`、`timeoutMs`。
+配置写在 `cordis.patch.yml` 的 `config` 段，可调项：`gate`、`gateMaxSteersPerTurn`、`gateMaxSteersPerSession`、`removalThreshold`、`volumeThreshold`、`reviewAnyCodeChange`、`canaryShadow`、`jury`、`ignoreGlobs`、`extraTriggerGlobs`、`timeoutMs`。
 
 两个容易误读的点：
 

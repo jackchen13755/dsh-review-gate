@@ -32,6 +32,30 @@
       "new": "  return true;",
       "expectRed": "@canary id=review-expert.tool-name",
       "why": "反方向：把工具名判据整段放开，任何工具只要参数里带「代码审查工程师」都会被当成评审证据。只钉专家名一个方向等于只锁半扇门。"
+    },
+    {
+      "id": "jury.min-seats",
+      "file": "lib/jury.js",
+      "old": "  if (cast < seats) {",
+      "new": "  if (false) {",
+      "expectRed": "@canary id=jury.min-seats",
+      "why": "把「三席齐备」摘掉，两票 pass 就会被当成通过——这正是「第三票还没投」被读成「已通过」的形态。"
+    },
+    {
+      "id": "jury.majority-threshold",
+      "file": "lib/jury.js",
+      "old": "  if (counts.pass >= need) {",
+      "new": "  if (counts.pass > need) {",
+      "expectRed": "@canary id=jury.majority-threshold",
+      "why": "把多数门槛的 >= 改成 >，恰好达到门槛（2/3）时静默不通过：判定类代码最典型的一格。"
+    },
+    {
+      "id": "jury.verdict-set",
+      "file": "lib/jury.js",
+      "old": "  if (typeof verdict !== 'string' || !VERDICT_SET.has(verdict)) {",
+      "new": "  if (false) {",
+      "expectRed": "@canary id=jury.verdict-set",
+      "why": "把单票结论的集合校验整段放开，'PASS' 这类未知值会被收下并进入多数决——坏票必须整组作废。"
     }
   ]
 }
